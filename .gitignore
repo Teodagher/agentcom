@@ -1,0 +1,4 @@
+node_modules
+data/
+.vercel
+.claude/current-task

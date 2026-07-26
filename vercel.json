@@ -1,0 +1,6 @@
+{
+  "rewrites": [
+    { "source": "/", "destination": "https://agentcom.178-105-24-117.sslip.io/" },
+    { "source": "/:path*", "destination": "https://agentcom.178-105-24-117.sslip.io/:path*" }
+  ]
+}
