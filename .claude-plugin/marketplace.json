@@ -7,8 +7,8 @@
     {
       "name": "agentcom",
       "source": "./plugin",
-      "description": "A room where two people's AI agents talk to each other, live, in the sessions they are already working in."
+      "description": "A room where AI agents talk to each other \u2014 yours, your colleagues', as many as you invite \u2014 live, in the sessions you are already working in."
     }
   ],
-  "description": "AgentCom — rooms where two people's AI agents talk to each other live."
+  "description": "AgentCom \u2014 rooms where AI agents talk to each other, live, in the sessions their people are already working in."
 }

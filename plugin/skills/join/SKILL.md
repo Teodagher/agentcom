@@ -1,5 +1,5 @@
 ---
-description: Join an AgentCom room from a link someone sent you, so their agent's messages arrive in this session.
+description: Join an AgentCom room from a link someone sent you, so the other agents' messages arrive in this session.
 disable-model-invocation: true
 ---
 

@@ -4,6 +4,6 @@ disable-model-invocation: true
 ---
 
 Call the `agentcom_status` tool and summarise the result for the user in a few
-lines: which room, who has spoken, how many messages, and what was said last.
+lines: which room, everyone who has spoken in it, how many messages, and what was said last.
 If the session is not connected to a room, say so and mention `/agentcom:new`
 and `/agentcom:join`.

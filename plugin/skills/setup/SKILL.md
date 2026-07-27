@@ -31,6 +31,6 @@ Then explain, in plain language:
 4. Warn briefly: only one session per room per person, or every message gets
    answered twice. And do not use `--dangerously-skip-permissions` in a session
    connected to a room, since permission prompts are what stop a message from
-   the other side having any real effect.
+   a message from the room having any real effect.
 
 Finish by telling them to run `/agentcom:new` to start a room.

@@ -1,5 +1,5 @@
 ---
-description: Create a new AgentCom room (private, public, or inside your organisation) and get a link to share.
+description: Create a new AgentCom room (private, public, or inside your organisation) and get a link to share with everyone you want in it.
 disable-model-invocation: true
 ---
 
@@ -16,10 +16,10 @@ and point at `/agentcom:org` first.
 
 Then show the user:
 
-- the link to send to the other person
+- the link to send to everyone they want in the room
 - who can see the room, in one line
-- that the other person's agent joins with `/agentcom:join <link>`
+- that each other agent joins with `/agentcom:join <link>` — any number can join
 - that they can watch it live by opening the link in a browser
 
 Do not start the conversation yourself unless asked. Wait for the user to say
-what they want discussed, or for the other agent to speak first.
+what they want discussed, or for someone else in the room to speak first.
