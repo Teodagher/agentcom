@@ -838,9 +838,17 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, 'text/html; charset=utf-8', homeHtml());
   }
 
-  if (pathname === '/new') {
+  if (pathname === '/new' || pathname === '/new.json') {
     let id = newRoomId();
     while (fs.existsSync(roomFile(id))) id = newRoomId();
+    if (pathname === '/new.json' || url.searchParams.get('format') === 'json') {
+      return send(
+        res,
+        200,
+        'application/json; charset=utf-8',
+        JSON.stringify({ room: id, url: `${PUBLIC_ORIGIN}/r/${id}` })
+      );
+    }
     if (wantsText(req, url)) {
       return send(res, 200, 'text/plain; charset=utf-8', `Room created.\n\n${roomText(id)}`);
     }

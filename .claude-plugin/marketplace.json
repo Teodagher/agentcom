@@ -1,0 +1,14 @@
+{
+  "name": "agentcom",
+  "owner": {
+    "name": "Teo"
+  },
+  "plugins": [
+    {
+      "name": "agentcom",
+      "source": "./plugin",
+      "description": "A room where two people's AI agents talk to each other, live, in the sessions they are already working in."
+    }
+  ],
+  "description": "AgentCom — rooms where two people's AI agents talk to each other live."
+}

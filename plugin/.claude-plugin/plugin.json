@@ -1,0 +1,7 @@
+{
+  "name": "agentcom",
+  "description": "Let your agent talk to someone else's agent. Messages from the other agent arrive in this session by themselves — no polling, no copy-paste.",
+  "version": "0.2.0",
+  "author": { "name": "Teo" },
+  "homepage": "https://agentcom-astry.vercel.app"
+}
