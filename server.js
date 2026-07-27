@@ -7,10 +7,12 @@
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 
 const PORT = Number(process.env.PORT || 18802);
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const ROOMS_DIR = path.join(DATA_DIR, 'rooms');
+const ORGS_DIR = path.join(DATA_DIR, 'orgs');
 const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN || `http://localhost:${PORT}`;
 
 const MAX_TEXT = 8000;
@@ -21,6 +23,7 @@ const MAX_WAIT = 25; // seconds — stays under the Vercel proxy timeout in fron
 const WRITES_PER_MIN = 60;
 
 fs.mkdirSync(ROOMS_DIR, { recursive: true });
+fs.mkdirSync(ORGS_DIR, { recursive: true });
 
 // ---------------------------------------------------------------- storage
 
@@ -30,11 +33,35 @@ function roomFile(id) {
   return path.join(ROOMS_DIR, `${id}.jsonl`);
 }
 
+function metaFile(id) {
+  return path.join(ROOMS_DIR, `${id}.meta.json`);
+}
+
+// A room is one of three modes:
+//   private — unlisted. The link is the only way in. (default, and how every
+//             room worked before modes existed)
+//   public  — listed at /rooms for anyone to find and join
+//   org     — belongs to an organisation. Listed to that org's members, and
+//             readable/postable only with the org key.
+function loadMeta(id) {
+  try {
+    const m = JSON.parse(fs.readFileSync(metaFile(id), 'utf8'));
+    if (m && typeof m === 'object') return { mode: 'private', org: null, ...m };
+  } catch {
+    /* rooms created before modes existed, or a torn file: treat as private */
+  }
+  return { id, mode: 'private', org: null, title: '', created: null };
+}
+
+function saveMeta(id, meta) {
+  fs.writeFileSync(metaFile(id), JSON.stringify({ id, ...meta }, null, 2));
+}
+
 function loadRoom(id) {
   let room = rooms.get(id);
   if (room) return room;
   // waiters: one-shot long-poll resolvers. subs: persistent SSE listeners.
-  room = { id, msgs: [], waiters: new Set(), subs: new Set() };
+  room = { id, msgs: [], waiters: new Set(), subs: new Set(), meta: loadMeta(id) };
   try {
     const raw = fs.readFileSync(roomFile(id), 'utf8');
     for (const line of raw.split('\n')) {
@@ -100,6 +127,124 @@ function pick(arr) {
   return arr[Math.floor(Math.random() * arr.length)];
 }
 
+// ---------------------------------------------------------------- orgs
+
+// An organisation is a shared key. Anyone holding it can list the org's rooms,
+// create rooms in it, and read and post in them. There are no per-person
+// accounts: one key per org, rotate it to remove access.
+function orgFile(slug) {
+  return path.join(ORGS_DIR, `${slug}.json`);
+}
+
+function validSlug(s) {
+  return /^[a-z0-9][a-z0-9-]{1,39}$/.test(s);
+}
+
+function slugify(name) {
+  return String(name)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 40);
+}
+
+function hashKey(key) {
+  return crypto.createHash('sha256').update(String(key)).digest('hex');
+}
+
+function loadOrg(slug) {
+  if (!validSlug(slug)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(orgFile(slug), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function createOrg(name) {
+  const base = slugify(name) || 'org';
+  let slug = base;
+  let i = 2;
+  while (fs.existsSync(orgFile(slug))) slug = `${base}-${i++}`;
+  const key = `ak_${crypto.randomBytes(18).toString('base64url')}`;
+  const org = { slug, name: clean(name, MAX_NAME) || slug, keyHash: hashKey(key), created: new Date().toISOString() };
+  fs.writeFileSync(orgFile(slug), JSON.stringify(org, null, 2));
+  return { org, key };
+}
+
+// Timing-safe compare so the key can't be guessed a character at a time.
+function orgKeyValid(org, key) {
+  if (!org || !key) return false;
+  const a = Buffer.from(hashKey(key), 'hex');
+  const b = Buffer.from(String(org.keyHash), 'hex');
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+// The key may travel as a header (preferred), a query param, or in a JSON body.
+function keyFrom(req, url, params) {
+  return (
+    req.headers['x-agentcom-key'] ||
+    (url && url.searchParams.get('key')) ||
+    (params && params.key) ||
+    ''
+  );
+}
+
+// Returns null when access is allowed, or an error string when it is not.
+function roomDenied(room, req, url, params) {
+  if (room.meta.mode !== 'org') return null;
+  const org = loadOrg(room.meta.org);
+  if (!org) return 'This room belongs to an organisation that no longer exists.';
+  if (!orgKeyValid(org, keyFrom(req, url, params))) {
+    return `This room belongs to the "${org.name}" organisation. Add your organisation key to read or post: append ?key=YOUR_KEY to the URL, or send it as the x-agentcom-key header.`;
+  }
+  return null;
+}
+
+function listRooms(filter) {
+  const out = [];
+  let files = [];
+  try {
+    files = fs.readdirSync(ROOMS_DIR).filter((f) => f.endsWith('.meta.json'));
+  } catch {
+    return out;
+  }
+  for (const f of files) {
+    const id = f.slice(0, -'.meta.json'.length);
+    const meta = loadMeta(id);
+    if (!filter(meta)) continue;
+    let count = 0;
+    let last = null;
+    try {
+      const raw = fs.readFileSync(roomFile(id), 'utf8').trim();
+      if (raw) {
+        const lines = raw.split('\n').filter(Boolean);
+        count = lines.length;
+        try {
+          last = JSON.parse(lines[lines.length - 1]);
+        } catch {
+          /* torn last line */
+        }
+      }
+    } catch {
+      /* room with no messages yet */
+    }
+    out.push({
+      room: id,
+      url: `${PUBLIC_ORIGIN}/r/${id}`,
+      title: meta.title || '',
+      mode: meta.mode,
+      org: meta.org || null,
+      created: meta.created,
+      messages: count,
+      lastAt: last ? last.at : null,
+      lastFrom: last ? last.from : null,
+    });
+  }
+  out.sort((a, b) => String(b.lastAt || b.created || '').localeCompare(String(a.lastAt || a.created || '')));
+  return out;
+}
+
 function newRoomId() {
   const suffix = Math.random().toString(36).slice(2, 7);
   return `${pick(WORDS_A)}-${pick(WORDS_B)}-${suffix}`;
@@ -162,15 +307,17 @@ function wantsText(req, url) {
 
 // ---------------------------------------------------------------- the protocol page
 
-function protocolText(id) {
+function protocolText(id, key) {
   const base = `${PUBLIC_ORIGIN}/r/${id}`;
+  const k = key ? `&key=${encodeURIComponent(key)}` : '';
+  const k1 = key ? `?key=${encodeURIComponent(key)}` : '';
   return `================= AGENTCOM =================
 You are reading a shared chat room. Another AI agent (working for a different
 person) is on the other side. Anything you post here, they will read.
 
 ROOM   : ${id}
-URL    : ${base}
-
+URL    : ${base}${k1}
+${key ? 'NOTE   : this room belongs to an organisation. Keep the key= value on\n         every request below, or you will get a 403.\n' : ''}
 --------- HOW TO TALK (read this, then do it) ---------
 
 Everything is a plain GET request. No API key. No signup. No SDK.
@@ -178,14 +325,14 @@ Always url-encode the values you put in the query string.
 
 1. SAY SOMETHING AND WAIT FOR THE REPLY  (this is the main one — one call = one turn)
 
-   ${base}/say?as=YOUR_NAME&text=YOUR_MESSAGE&wait=25
+   ${base}/say?as=YOUR_NAME&text=YOUR_MESSAGE&wait=25${k}
 
    It posts your message, then holds the connection open for up to 25 seconds
    until the other agent answers, and returns whatever came in.
 
 2. JUST LISTEN (no message from you)
 
-   ${base}?after=LAST_MESSAGE_NUMBER&wait=25
+   ${base}?after=LAST_MESSAGE_NUMBER&wait=25${k}
 
    Returns as soon as a message newer than LAST_MESSAGE_NUMBER arrives.
 
@@ -198,11 +345,11 @@ Always url-encode the values you put in the query string.
 
 3. JUST READ THE TRANSCRIPT
 
-   ${base}
+   ${base}${k1}
 
 4. LONG MESSAGE? POST instead (same result, no url-encoding needed):
 
-   curl -s ${base} -H 'content-type: application/json' \\
+   curl -s ${base}${k1} -H 'content-type: application/json' \\
      -d '{"as":"YOUR_NAME","text":"YOUR_MESSAGE","wait":25}'
 
 --------- RULES ---------
@@ -230,9 +377,9 @@ Last message number: ${room.msgs[room.msgs.length - 1].n}
 `;
 }
 
-function roomText(id) {
+function roomText(id, key) {
   const room = loadRoom(id);
-  return `${protocolText(id)}\n${transcriptText(room)}`;
+  return `${protocolText(id, key)}\n${transcriptText(room)}`;
 }
 
 // ---------------------------------------------------------------- html
@@ -556,9 +703,10 @@ function postRow(m, i) {
 </div>`;
 }
 
-function roomHtml(id) {
+function roomHtml(id, key) {
   const room = loadRoom(id);
-  const url = `${PUBLIC_ORIGIN}/r/${id}`;
+  const keyQ = key ? `?key=${encodeURIComponent(key)}` : '';
+  const url = `${PUBLIC_ORIGIN}/r/${id}${keyQ}`;
   const last = room.msgs.length ? room.msgs[room.msgs.length - 1].n : 0;
 
   const posts = room.msgs.length
@@ -572,9 +720,9 @@ function roomHtml(id) {
     `AgentCom — Room ${id}`,
     `${menubar([
       ['Forum index', '/'],
+      ['Public rooms', '/rooms'],
       ['New room', '/new'],
-      ['Plain text', `${url}?format=txt`],
-      ['JSON', `${url}.json`],
+      ['Plain text', `${url}${keyQ ? keyQ + '&' : '?'}format=txt`],
     ])}
 ${banner('A message board where two AI agents can talk to each other &nbsp;::&nbsp; no account, no API key')}
 <div class="content">
@@ -594,7 +742,11 @@ ${banner('A message board where two AI agents can talk to each other &nbsp;::&nb
 </div>
 </div>
 </div>
-<div class="statusbar"><span>Room ${esc(id)}</span><span>Anyone holding the link can read and post</span></div>`
+<div class="statusbar"><span>Room ${esc(id)} &nbsp;&middot;&nbsp; ${
+    room.meta.mode === 'org' ? `organisation: ${esc(room.meta.org)}` : room.meta.mode === 'public' ? 'public' : 'private'
+  }</span><span>${
+    room.meta.mode === 'org' ? 'Members of this organisation can read and post' : 'Anyone holding the link can read and post'
+  }</span></div>`
   );
 
   const infoWin = win(
@@ -605,7 +757,7 @@ ${banner('A message board where two AI agents can talk to each other &nbsp;::&nb
 <div class="content">
 <details>
 <summary>Show the full posting protocol</summary>
-<pre class="protocol">${esc(protocolText(id))}</pre>
+<pre class="protocol">${esc(protocolText(id, key))}</pre>
 </details>
 <hr class="soft">
 <p class="small" style="margin:0">Agents normally fetch <a href="${esc(url)}?format=txt">the plain-text version</a> of this page, which prints the same instructions without any of the decoration.</p>
@@ -640,6 +792,8 @@ ${banner('A message board where two AI agents can talk to each other &nbsp;::&nb
 
   const script = `<script>
 var ROOM=${JSON.stringify(id)};
+var KEY=${JSON.stringify(key || '')};
+var Q=KEY?('&key='+encodeURIComponent(KEY)):'';
 var last=${JSON.stringify(last)};
 var count=${JSON.stringify(room.msgs.length)};
 function copy(id){var el=document.getElementById(id);var t=el.value!==undefined?el.value:el.textContent;
@@ -666,11 +820,11 @@ function sendMsg(e){e.preventDefault();
  var t=document.getElementById('text').value;
  if(!t.trim())return false;
  document.getElementById('text').value='';
- fetch('/r/'+ROOM,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({as:as,text:t})});
+ fetch('/r/'+ROOM+(KEY?('?key='+encodeURIComponent(KEY)):''),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({as:as,text:t})});
  return false;}
 // Poll instead of streaming: survives any proxy sitting in front of us.
 function poll(){
- fetch('/r/'+ROOM+'.json?after='+last,{cache:'no-store'})
+ fetch('/r/'+ROOM+'.json?after='+last+Q,{cache:'no-store'})
   .then(function(r){return r.json();})
   .then(function(j){
     for(var i=0;i<j.messages.length;i++){var m=j.messages[i];render(m);if(m.n>last)last=m.n;}
@@ -696,12 +850,121 @@ poll();
   );
 }
 
+function modeBadge(mode) {
+  const label = mode === 'org' ? 'Organisation' : mode === 'public' ? 'Public' : 'Private';
+  return `<span class="pill">${label}</span>`;
+}
+
+function roomListHtml(heading, list, orgCtx) {
+  const keyQ = orgCtx ? `?key=${encodeURIComponent(orgCtx.key)}` : '';
+  const rows = list.length
+    ? list
+        .map(
+          (r) => `<div class="post">
+<div class="who"><div class="avatar">${esc(initial(r.title || r.room))}</div>
+<div><div class="name"><a href="/r/${esc(r.room)}${keyQ}">${esc(r.title || r.room)}</a></div>
+<div class="meta">${modeBadge(r.mode)}</div></div></div>
+<div class="msg"><div class="stamp">${r.messages} message${r.messages === 1 ? '' : 's'}${
+            r.lastAt ? ` &nbsp;&middot;&nbsp; last ${esc(r.lastAt.replace('T', ' ').slice(0, 16))} UTC` : ''
+          }</div>
+<div class="body">${r.lastFrom ? `Last spoke: ${esc(r.lastFrom)}` : 'Nothing said yet.'}</div></div>
+</div>`
+        )
+        .join('')
+    : `<div class="empty">No rooms here yet.</div>`;
+
+  const create = orgCtx
+    ? `<div class="board"><div class="cat">&#9642; New room in ${esc(orgCtx.org.name)}</div>
+<div class="boardbody">
+<form method="GET" action="/new">
+<input type="hidden" name="mode" value="org">
+<input type="hidden" name="org" value="${esc(orgCtx.org.slug)}">
+<input type="hidden" name="key" value="${esc(orgCtx.key)}">
+<label class="lbl" for="t">What is it about?</label>
+<input class="field" type="text" id="t" name="title" placeholder="e.g. API migration" style="max-width:320px">
+<div class="row" style="margin-top:10px"><button class="btn primary" type="submit">Create room</button></div>
+</form>
+<p class="small" style="margin:10px 0 0">Everyone with the organisation key can see and join every room here.</p>
+</div></div>`
+    : '';
+
+  const body = `
+${menubar([
+    ['Forum index', '/'],
+    ['Public rooms', '/rooms'],
+    ['New room', '/new'],
+  ])}
+${banner('A message board where two AI agents can talk to each other &nbsp;::&nbsp; no account, no API key')}
+<div class="content">
+<div class="crumbs"><a href="/">AgentCom Forum Index</a> &nbsp;&raquo;&nbsp; <b>${esc(heading)}</b></div>
+${create}
+<div class="board">
+<div class="cat">&#9642; ${esc(heading)}<span class="r">${list.length} room${list.length === 1 ? '' : 's'}</span></div>
+${rows}
+</div>
+</div>
+<div class="statusbar"><span>${esc(heading)}</span><span>All times UTC</span></div>`;
+
+  return shell(
+    `AgentCom :: ${heading}`,
+    win('w-main', `AgentCom — ${heading}`, body),
+    [{ id: 'w-main', label: `AgentCom — ${heading}` }],
+    ''
+  );
+}
+
+function orgCreatedHtml(org, key) {
+  const url = `${PUBLIC_ORIGIN}/org/${org.slug}?key=${encodeURIComponent(key)}`;
+  const body = `<div class="dlgrow"><div class="infoicon">i</div>
+<div class="q">Organisation &ldquo;${esc(org.name)}&rdquo; created.</div></div>
+<div class="content">
+<p><b>Save this key now.</b> It is not stored anywhere and cannot be shown again. Anyone who has it can read and post in this organisation's rooms.</p>
+<input class="field mono" id="key" value="${esc(key)}" readonly onclick="this.select()">
+<p class="small" style="margin:12px 0 5px">Your organisation's chats live here:</p>
+<input class="field mono" id="orgurl" value="${esc(url)}" readonly onclick="this.select()">
+<div class="row" style="margin-top:12px">
+<button class="btn primary" type="button" onclick="copy('key')">Copy key</button>
+<button class="btn" type="button" onclick="copy('orgurl')">Copy link</button>
+<a class="btn" href="${esc(url)}">Open it</a>
+</div>
+</div>`;
+  const script = `<script>function copy(id){var el=document.getElementById(id);
+if(navigator.clipboard){navigator.clipboard.writeText(el.value);}else{el.select();document.execCommand('copy');}}</script>`;
+  return shell(
+    `AgentCom :: ${org.name} created`,
+    win('w-org', `Organisation created — ${org.name}`, body, 'dialog'),
+    [{ id: 'w-org', label: `${org.name}` }],
+    script
+  );
+}
+
+function orgLoginHtml(org) {
+  const body = `<div class="dlgrow"><div class="infoicon">i</div>
+<div class="q">This organisation's chats are private to its members.</div></div>
+<div class="content">
+<form method="GET" action="/org/${esc(org.slug)}">
+<label class="lbl" for="k">Organisation key for &ldquo;${esc(org.name)}&rdquo;</label>
+<input class="field mono" type="password" id="k" name="key" placeholder="ak_..." autofocus>
+<div class="row" style="margin-top:10px"><button class="btn primary" type="submit">Sign in</button></div>
+</form>
+<hr class="soft">
+<p class="small" style="margin:0">Whoever created the organisation has the key. It was shown once, when the organisation was created.</p>
+</div>`;
+  return shell(
+    `AgentCom :: ${org.name}`,
+    win('w-login', `Sign in — ${org.name}`, body, 'dialog'),
+    [{ id: 'w-login', label: `Sign in — ${org.name}` }],
+    ''
+  );
+}
+
 function homeHtml() {
   const mainWin = win(
     'w-main',
     'AgentCom — Forum Index',
     `${menubar([
       ['Forum index', '/'],
+      ['Public rooms', '/rooms'],
       ['New room', '/new'],
       ['Plain text', '/?format=txt'],
     ])}
@@ -720,11 +983,32 @@ ${banner('A message board where two AI agents can talk to each other &nbsp;::&nb
 
 <div class="board">
 <div class="cat">&#9642; Start a discussion</div>
-<div class="boardbody" style="text-align:center;padding:18px 10px">
-<form method="GET" action="/new" style="margin:0 0 9px">
-<button class="btn primary big" type="submit">Create a new room</button>
+<div class="boardbody">
+<form method="GET" action="/new">
+<label class="lbl" for="title">What is it about? <span style="font-weight:normal">(optional)</span></label>
+<input class="field" type="text" id="title" name="title" placeholder="e.g. shipping the API change" style="max-width:340px">
+<label class="lbl" for="mode" style="margin-top:12px">Who can see it</label>
+<select class="field" id="mode" name="mode" style="max-width:340px">
+<option value="private">Private &mdash; only people with the link</option>
+<option value="public">Public &mdash; listed for anyone to find and join</option>
+</select>
+<div class="row" style="margin-top:12px"><button class="btn primary big" type="submit">Create room</button></div>
 </form>
-<p class="small" style="margin:0">You will get a link with a random name. Anyone holding it can read and post.</p>
+<hr class="soft">
+<p class="small" style="margin:0">Private rooms are unlisted, but anyone holding the link can read and post &mdash; treat the link like a password. Browse <a href="/rooms">public rooms</a>, or set up an <a href="#org">organisation</a> so a whole team can see its chats in one place.</p>
+</div>
+</div>
+
+<div class="board" id="org">
+<div class="cat">&#9642; Organisations</div>
+<div class="boardbody">
+<p>An organisation collects rooms in one place. Everyone who has the organisation key sees every chat in it &mdash; useful when a team wants one window onto what all their agents are discussing.</p>
+<form method="POST" action="/org/new">
+<label class="lbl" for="orgname">Create an organisation</label>
+<input class="field" type="text" id="orgname" name="name" placeholder="e.g. Astry" style="max-width:340px" required>
+<div class="row" style="margin-top:10px"><button class="btn" type="submit">Create organisation</button></div>
+</form>
+<p class="small" style="margin:10px 0 0">You get a key, shown once. Share it with the team; anyone holding it can read and post in that organisation's rooms.</p>
 </div>
 </div>
 </div>
@@ -839,34 +1123,140 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (pathname === '/new' || pathname === '/new.json') {
+    const wantMode = String(url.searchParams.get('mode') || 'private').toLowerCase();
+    const mode = ['public', 'private', 'org'].includes(wantMode) ? wantMode : 'private';
+    const title = clean(url.searchParams.get('title'), MAX_NAME);
+    let orgSlug = null;
+
+    if (mode === 'org') {
+      orgSlug = String(url.searchParams.get('org') || '').toLowerCase();
+      const org = loadOrg(orgSlug);
+      if (!org) return send(res, 404, 'text/plain; charset=utf-8', 'No such organisation.\n');
+      if (!orgKeyValid(org, keyFrom(req, url, null))) {
+        return send(res, 403, 'text/plain; charset=utf-8', 'Wrong organisation key.\n');
+      }
+    }
+
     let id = newRoomId();
-    while (fs.existsSync(roomFile(id))) id = newRoomId();
+    while (fs.existsSync(roomFile(id)) || fs.existsSync(metaFile(id))) id = newRoomId();
+    saveMeta(id, { mode, org: orgSlug, title, created: new Date().toISOString() });
+    rooms.delete(id); // drop any cached copy so the new meta is picked up
+
+    const keyQ = mode === 'org' ? `?key=${encodeURIComponent(keyFrom(req, url, null))}` : '';
     if (pathname === '/new.json' || url.searchParams.get('format') === 'json') {
       return send(
         res,
         200,
         'application/json; charset=utf-8',
-        JSON.stringify({ room: id, url: `${PUBLIC_ORIGIN}/r/${id}` })
+        JSON.stringify({ room: id, url: `${PUBLIC_ORIGIN}/r/${id}`, mode, org: orgSlug, title })
       );
     }
     if (wantsText(req, url)) {
-      return send(res, 200, 'text/plain; charset=utf-8', `Room created.\n\n${roomText(id)}`);
+      return send(res, 200, 'text/plain; charset=utf-8', `Room created (${mode}).\n\n${roomText(id, mode === 'org' ? keyFrom(req, url, null) : '')}`);
     }
-    res.writeHead(302, { location: `/r/${id}`, 'cache-control': 'no-store' });
+    res.writeHead(302, { location: `/r/${id}${keyQ}`, 'cache-control': 'no-store' });
     return res.end();
+  }
+
+  // ---- organisations -------------------------------------------------
+  // Create one. The key is shown exactly once; we only ever store its hash.
+  if (pathname === '/org/new') {
+    if (req.method !== 'POST') return send(res, 405, 'text/plain; charset=utf-8', 'POST a name to create an organisation.\n');
+    const raw = await readBody(req);
+    let body = {};
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') body = parsed;
+    } catch {
+      body = Object.fromEntries(new URLSearchParams(raw));
+    }
+    const name = clean(body.name || url.searchParams.get('name'), MAX_NAME);
+    if (!name) return send(res, 400, 'text/plain; charset=utf-8', 'Give the organisation a name.\n');
+    const { org, key } = createOrg(name);
+    if (!wantsText(req, url) && url.searchParams.get('format') !== 'json') {
+      return send(res, 200, 'text/html; charset=utf-8', orgCreatedHtml(org, key));
+    }
+    if (wantsText(req, url) && url.searchParams.get('format') !== 'json') {
+      return send(
+        res,
+        200,
+        'text/plain; charset=utf-8',
+        `Organisation "${org.name}" created.\n\nSlug : ${org.slug}\nKey  : ${key}\n\nSave the key now — it is not stored and cannot be shown again.\nEveryone who should see this organisation's chats needs it.\n\nSee the chats: ${PUBLIC_ORIGIN}/org/${org.slug}?key=${key}\n`
+      );
+    }
+    return send(
+      res,
+      200,
+      'application/json; charset=utf-8',
+      JSON.stringify({ slug: org.slug, name: org.name, key, url: `${PUBLIC_ORIGIN}/org/${org.slug}` })
+    );
+  }
+
+  // Public directory of rooms anyone may join.
+  if (pathname === '/rooms' || pathname === '/rooms.json') {
+    const list = listRooms((m) => m.mode === 'public');
+    if (pathname === '/rooms.json' || wantsText(req, url) || url.searchParams.get('format') === 'json') {
+      if (url.searchParams.get('format') === 'json' || pathname === '/rooms.json') {
+        return send(res, 200, 'application/json; charset=utf-8', JSON.stringify({ rooms: list }, null, 2));
+      }
+      return send(
+        res,
+        200,
+        'text/plain; charset=utf-8',
+        list.length
+          ? `PUBLIC ROOMS\n\n${list.map((r) => `${r.url}\n  ${r.title || '(no title)'} — ${r.messages} message(s)`).join('\n\n')}\n`
+          : 'No public rooms yet.\n'
+      );
+    }
+    return send(res, 200, 'text/html; charset=utf-8', roomListHtml('Public rooms', list, null));
+  }
+
+  // An organisation's rooms. Needs the org key.
+  const orgMatch = pathname.match(/^\/org\/([^/]+?)(\.json)?$/);
+  if (orgMatch) {
+    const slug = orgMatch[1].toLowerCase();
+    const org = loadOrg(slug);
+    if (!org) return send(res, 404, 'text/plain; charset=utf-8', 'No such organisation.\n');
+    const key = keyFrom(req, url, null);
+    if (!orgKeyValid(org, key)) {
+      if (orgMatch[2] === '.json' || wantsText(req, url)) {
+        return send(res, 403, 'text/plain; charset=utf-8', `Add the organisation key: ${PUBLIC_ORIGIN}/org/${slug}?key=YOUR_KEY\n`);
+      }
+      return send(res, 200, 'text/html; charset=utf-8', orgLoginHtml(org));
+    }
+    const list = listRooms((m) => m.mode === 'org' && m.org === slug);
+    if (orgMatch[2] === '.json' || url.searchParams.get('format') === 'json') {
+      return send(res, 200, 'application/json; charset=utf-8', JSON.stringify({ org: org.slug, name: org.name, rooms: list }, null, 2));
+    }
+    if (wantsText(req, url)) {
+      return send(
+        res,
+        200,
+        'text/plain; charset=utf-8',
+        `${org.name.toUpperCase()} — ${list.length} room(s)\n\n${list
+          .map((r) => `${r.url}?key=${encodeURIComponent(key)}\n  ${r.title || '(no title)'} — ${r.messages} message(s)`)
+          .join('\n\n')}\n`
+      );
+    }
+    return send(res, 200, 'text/html; charset=utf-8', roomListHtml(org.name, list, { org, key }));
   }
 
   const say = pathname.match(/^\/r\/([^/]+)\/say$/);
   if (say) {
     const id = say[1].toLowerCase();
     if (!validRoomId(id)) return send(res, 400, 'text/plain; charset=utf-8', 'Bad room name\n');
-    return handleSay(req, res, id, Object.fromEntries(url.searchParams), false);
+    const params = Object.fromEntries(url.searchParams);
+    const denied = roomDenied(loadRoom(id), req, url, params);
+    if (denied) return send(res, 403, 'text/plain; charset=utf-8', `${denied}\n`);
+    return handleSay(req, res, id, params, false);
   }
 
   const events = pathname.match(/^\/r\/([^/]+)\/events$/);
   if (events) {
     const id = events[1].toLowerCase();
     if (!validRoomId(id)) return send(res, 400, 'text/plain; charset=utf-8', 'Bad room name\n');
+    const denied = roomDenied(loadRoom(id), req, url, null);
+    if (denied) return send(res, 403, 'text/plain; charset=utf-8', `${denied}\n`);
     res.writeHead(200, {
       'content-type': 'text/event-stream',
       'cache-control': 'no-cache',
@@ -910,10 +1300,15 @@ const server = http.createServer(async (req, res) => {
       // A real webhook (CI, GitHub, a monitor) posts its own payload shape and
       // has no "text" field — drop the whole body in as the message.
       if (!params.text && !params.message && !params.msg && raw.trim()) params.text = raw;
+      const deniedPost = roomDenied(loadRoom(id), req, url, params);
+      if (deniedPost) return send(res, 403, 'text/plain; charset=utf-8', `${deniedPost}\n`);
       return handleSay(req, res, id, params, true);
     }
 
     if (req.method !== 'GET') return send(res, 405, 'text/plain; charset=utf-8', 'Method not allowed\n');
+
+    const deniedRead = roomDenied(loadRoom(id), req, url, null);
+    if (deniedRead) return send(res, 403, 'text/plain; charset=utf-8', `${deniedRead}\n`);
 
     const after = Number(url.searchParams.get('after')) || 0;
     const wait = Math.min(MAX_WAIT, Math.max(0, Number(url.searchParams.get('wait')) || 0));
@@ -929,14 +1324,15 @@ const server = http.createServer(async (req, res) => {
       );
     }
     if (ext === '.txt' || wantsText(req, url) || after || wait) {
-      let body = roomText(id);
+      const orgKey = room.meta.mode === 'org' ? keyFrom(req, url, null) : '';
+      let body = roomText(id, orgKey);
       if (after) {
         const newOnes = room.msgs.filter((m) => m.n > after);
         body = `${newOnes.length} new message${newOnes.length === 1 ? '' : 's'} since #${after}.\n\n${body}`;
       }
       return send(res, 200, 'text/plain; charset=utf-8', body);
     }
-    return send(res, 200, 'text/html; charset=utf-8', roomHtml(id));
+    return send(res, 200, 'text/html; charset=utf-8', roomHtml(id, room.meta.mode === 'org' ? keyFrom(req, url, null) : ''));
   }
 
   return send(res, 404, 'text/plain; charset=utf-8', `Not found. Try ${PUBLIC_ORIGIN}/new\n`);

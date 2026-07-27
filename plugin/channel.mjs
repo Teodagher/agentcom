@@ -67,8 +67,13 @@ const INSTRUCTIONS =
 let stream = null; // AbortController for the live connection
 let lastSeen = 0;
 
+function withKey(url) {
+  if (!config.key) return url;
+  return url + (url.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(config.key);
+}
+
 async function api(url, init) {
-  const res = await fetch(url, init);
+  const res = await fetch(withKey(url), init);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return res;
 }
@@ -89,7 +94,7 @@ function connect(url) {
   (async () => {
     while (!ctl.signal.aborted) {
       try {
-        const res = await fetch(`${url}/events?after=${lastSeen}`, {
+        const res = await fetch(withKey(`${url}/events?after=${lastSeen}`), {
           headers: { accept: 'text/event-stream' },
           signal: ctl.signal,
         });
@@ -148,7 +153,37 @@ const TOOLS = [
       type: 'object',
       properties: {
         as: { type: 'string', description: 'Name to post under, e.g. "Teo\'s agent"' },
+        title: { type: 'string', description: 'What the conversation is about' },
+        mode: {
+          type: 'string',
+          enum: ['private', 'public', 'org'],
+          description:
+            'private (default) = link only; public = listed for anyone to find; org = inside the organisation you signed into',
+        },
       },
+    },
+  },
+  {
+    name: 'agentcom_browse',
+    description: 'List public AgentCom rooms that anyone can join, or the rooms of the organisation you signed into.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        where: { type: 'string', enum: ['public', 'org'], description: 'Which list to show (default public)' },
+      },
+    },
+  },
+  {
+    name: 'agentcom_org_signin',
+    description:
+      'Sign in to an AgentCom organisation with its key, so this session can see and join that organisation\'s rooms.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        org: { type: 'string', description: 'Organisation slug, e.g. "astry"' },
+        key: { type: 'string', description: 'The organisation key (ak_...)' },
+      },
+      required: ['org', 'key'],
     },
   },
   {
@@ -192,14 +227,68 @@ const ok = (text) => ({ content: [{ type: 'text', text }] });
 async function callTool(name, args = {}) {
   switch (name) {
     case 'agentcom_new_room': {
-      const res = await api(`${ORIGIN}/new.json`);
+      const mode = ['private', 'public', 'org'].includes(args.mode) ? args.mode : 'private';
+      if (mode === 'org' && !config.org) {
+        throw new Error('sign in to an organisation first with agentcom_org_signin');
+      }
+      const q = new URLSearchParams({ mode });
+      if (args.title) q.set('title', args.title);
+      if (mode === 'org') q.set('org', config.org);
+      const res = await api(`${ORIGIN}/new.json?${q}`);
       const { url } = await res.json();
       joinRoom(url, args.as);
+      const where =
+        mode === 'public'
+          ? 'It is listed publicly, so anyone can find and join it.'
+          : mode === 'org'
+            ? `It belongs to the "${config.org}" organisation — everyone with the organisation key can see it.`
+            : 'It is private: only people you send the link to can read or post.';
       return ok(
-        `Created room and now listening as "${config.as}".\n\n` +
+        `Created ${mode === 'org' ? 'an organisation' : 'a ' + mode} room and now listening as "${config.as}".\n${where}\n\n` +
           `Send this link to the other person:\n${url}\n\n` +
           `Their agent joins with: /agentcom:join ${url}\n` +
-          `Anyone can also watch the conversation live at that link in a browser.`
+          `Anyone with access can also watch the conversation live at that link in a browser.`
+      );
+    }
+    case 'agentcom_org_signin': {
+      const org = String(args.org || '').trim().toLowerCase();
+      const key = String(args.key || '').trim();
+      const res = await fetch(`${ORIGIN}/org/${encodeURIComponent(org)}.json?key=${encodeURIComponent(key)}`, {
+        headers: { accept: 'application/json' },
+      });
+      if (res.status === 403) throw new Error('that organisation key was not accepted');
+      if (!res.ok) throw new Error(`could not reach that organisation (${res.status})`);
+      const data = await res.json();
+      config.org = org;
+      config.key = key;
+      saveConfig(config);
+      return ok(
+        `Signed in to "${data.name}". ${data.rooms.length} room(s) visible.\n` +
+          data.rooms.map((r) => `  ${r.title || r.room} — ${r.messages} message(s)\n  ${r.url}`).join('\n') +
+          `\n\nCreate a room here with agentcom_new_room using mode "org".`
+      );
+    }
+    case 'agentcom_browse': {
+      const where = args.where === 'org' ? 'org' : 'public';
+      if (where === 'org') {
+        if (!config.org) throw new Error('not signed in to an organisation — use agentcom_org_signin');
+        const res = await api(`${ORIGIN}/org/${encodeURIComponent(config.org)}.json`);
+        const data = await res.json();
+        return ok(
+          data.rooms.length
+            ? `${data.name} — ${data.rooms.length} room(s):\n` +
+                data.rooms.map((r) => `  ${r.title || r.room} — ${r.messages} message(s)\n  ${r.url}`).join('\n')
+            : `${data.name} has no rooms yet.`
+        );
+      }
+      const res = await fetch(`${ORIGIN}/rooms.json`, { headers: { accept: 'application/json' } });
+      const { rooms = [] } = await res.json();
+      return ok(
+        rooms.length
+          ? `Public rooms:\n` +
+              rooms.map((r) => `  ${r.title || r.room} — ${r.messages} message(s)\n  ${r.url}`).join('\n') +
+              `\n\nJoin one with agentcom_join.`
+          : 'No public rooms yet. Create one with agentcom_new_room using mode "public".'
       );
     }
     case 'agentcom_join': {
@@ -235,6 +324,7 @@ async function callTool(name, args = {}) {
         .join('\n');
       return ok(
         `Room: ${config.room}\nPosting as: ${config.as}\n` +
+          (config.org ? `Organisation: ${config.org}\n` : '') +
           `Participants so far: ${who.length ? who.join(', ') : 'nobody yet'}\n` +
           `Messages: ${messages.length}\n` +
           (tail ? `\nLast messages:\n${tail}\n` : '') +
