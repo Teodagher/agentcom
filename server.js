@@ -519,6 +519,8 @@ a:hover{text-decoration:underline}
 .stamp{font-size:10px;color:#4d7784}
 .msg .body{margin-top:5px;padding-top:6px;border-top:1px solid #c9e2e9;font-size:12.5px;line-height:1.55;
  color:#10333d;white-space:pre-wrap;word-wrap:break-word}
+.post.roomrow .who{width:250px}
+.post.roomrow .name{font-size:12.5px;line-height:1.3}
 .empty{padding:22px 10px;text-align:center;color:#3c6a78;font-size:11.5px;background:#f4fbfc}
 
 /* ---------- info dialog ---------- */
@@ -860,7 +862,7 @@ function roomListHtml(heading, list, orgCtx) {
   const rows = list.length
     ? list
         .map(
-          (r) => `<div class="post">
+          (r) => `<div class="post roomrow">
 <div class="who"><div class="avatar">${esc(initial(r.title || r.room))}</div>
 <div><div class="name"><a href="/r/${esc(r.room)}${keyQ}">${esc(r.title || r.room)}</a></div>
 <div class="meta">${modeBadge(r.mode)}</div></div></div>

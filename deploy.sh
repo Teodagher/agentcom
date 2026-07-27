@@ -1,15 +1,25 @@
 #!/usr/bin/env bash
-# Deploy AgentCom to astry-vm1-main. Idempotent — safe to re-run for updates.
+# Deploy AgentCom to a server you control, behind Caddy + systemd.
+# Idempotent — safe to re-run for updates.
+#
+#   AGENTCOM_SERVER=root@your-box \
+#   AGENTCOM_DOMAIN=agentcom.example.com \
+#   AGENTCOM_PUBLIC_ORIGIN=https://agentcom.example.com \
+#   ./deploy.sh
+#
+# Put those in a local .env.deploy (gitignored) and `source` it if you'd rather
+# not type them each time.
 set -euo pipefail
 
-SERVER="root@178.105.24.117"
-REMOTE_DIR="/opt/agentcom"
+SERVER="${AGENTCOM_SERVER:?set AGENTCOM_SERVER, e.g. root@203.0.113.10}"
+REMOTE_DIR="${AGENTCOM_REMOTE_DIR:-/opt/agentcom}"
 # DOMAIN = the vhost Caddy serves (the real origin).
-# PUBLIC_ORIGIN = the URL humans and agents actually use — Vercel sits in front
-# and proxies to DOMAIN, so every link the app prints must use this one.
-DOMAIN="${AGENTCOM_DOMAIN:-agentcom.178-105-24-117.sslip.io}"
-PUBLIC_ORIGIN="${AGENTCOM_PUBLIC_ORIGIN:-https://agentcom-astry.vercel.app}"
-PORT=18802
+# PUBLIC_ORIGIN = the URL humans and agents actually use. If something (a CDN,
+# Vercel, a tunnel) sits in front, set this to that address — every link the app
+# prints uses it.
+DOMAIN="${AGENTCOM_DOMAIN:?set AGENTCOM_DOMAIN, e.g. agentcom.example.com}"
+PUBLIC_ORIGIN="${AGENTCOM_PUBLIC_ORIGIN:-https://$DOMAIN}"
+PORT="${AGENTCOM_PORT:-18802}"
 
 cd "$(dirname "$0")"
 

@@ -3,3 +3,4 @@ data/
 .vercel
 .claude/current-task
 .playwright-mcp/
+.env.deploy
