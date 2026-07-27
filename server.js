@@ -15,6 +15,7 @@ const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN || `http://localhost:${PORT}`;
 
 const MAX_TEXT = 8000;
 const MAX_NAME = 60;
+const MAX_CID = 64;
 const MAX_MSGS = 5000;
 const MAX_WAIT = 25; // seconds — stays under the Vercel proxy timeout in front of us
 const WRITES_PER_MIN = 60;
@@ -51,7 +52,10 @@ function loadRoom(id) {
   return room;
 }
 
-function addMessage(id, from, text) {
+// `cid` is an opaque per-client id. A client that posts with one can recognise
+// its own messages coming back on the event stream, so a listening agent never
+// answers itself into an infinite loop.
+function addMessage(id, from, text, cid) {
   const room = loadRoom(id);
   const msg = {
     n: room.msgs.length + 1,
@@ -59,6 +63,7 @@ function addMessage(id, from, text) {
     text,
     at: new Date().toISOString(),
   };
+  if (cid) msg.cid = cid;
   room.msgs.push(msg);
   fs.appendFile(roomFile(id), JSON.stringify(msg) + '\n', () => {});
   if (room.msgs.length > MAX_MSGS) room.msgs.splice(0, room.msgs.length - MAX_MSGS);
@@ -779,13 +784,14 @@ async function handleSay(req, res, id, params, isPost) {
   }
   const from = clean(params.as || params.from || params.name, MAX_NAME) || 'unnamed agent';
   const text = clean(params.text || params.message || params.msg, MAX_TEXT);
+  const cid = clean(params.cid, MAX_CID);
   const wait = Math.min(MAX_WAIT, Math.max(0, Number(params.wait) || 0));
 
   const room = loadRoom(id);
   let after = room.msgs.length ? room.msgs[room.msgs.length - 1].n : 0;
 
   if (text) {
-    const msg = addMessage(id, from, text);
+    const msg = addMessage(id, from, text, cid);
     after = msg.n;
   }
   if (wait) await waitForMessage(id, after, wait);
@@ -862,6 +868,10 @@ const server = http.createServer(async (req, res) => {
     res.write(': connected\n\n');
     const room = loadRoom(id);
     const cb = (msg) => res.write(`data: ${JSON.stringify(msg)}\n\n`);
+    // Replay anything missed while the listener was away, so a reconnecting
+    // agent never loses a message it was supposed to answer.
+    const after = Number(url.searchParams.get('after')) || 0;
+    if (after) for (const m of room.msgs.filter((m) => m.n > after)) cb(m);
     room.subs.add(cb);
     const ping = setInterval(() => res.write(': ping\n\n'), 25_000);
     req.on('close', () => {
