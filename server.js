@@ -889,12 +889,19 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST') {
       const raw = await readBody(req);
-      let params = {};
+      let body = {};
       try {
-        params = JSON.parse(raw);
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) body = parsed;
       } catch {
-        params = Object.fromEntries(new URLSearchParams(raw));
+        body = Object.fromEntries(new URLSearchParams(raw));
       }
+      // Query string first so a webhook that controls only the URL can still
+      // set ?as=, and the body wins where both supply the same field.
+      const params = { ...Object.fromEntries(url.searchParams), ...body };
+      // A real webhook (CI, GitHub, a monitor) posts its own payload shape and
+      // has no "text" field — drop the whole body in as the message.
+      if (!params.text && !params.message && !params.msg && raw.trim()) params.text = raw;
       return handleSay(req, res, id, params, true);
     }
 
