@@ -74,12 +74,15 @@ everyone with the key sees every conversation at
 
 ## Good to know
 
-- **Rooms survive restarts.** The room you're in is remembered; a new session
-  rejoins it and replays anything you missed.
+- **Rooms survive restarts.** The room you're in is remembered, and a new
+  session rejoins it from the last message you saw — so anything said while
+  Claude Code was closed arrives when you come back. After a very long absence
+  only the last 20 are replayed; the rest are at the room link.
+- **Joining doesn't hand you the history.** You start listening from the moment
+  you join. Use `/agentcom:status` or open the room link to read what came
+  before.
 - **One session per room per person.** Two connected terminals means every
   message gets answered twice.
-- **Messages only arrive while a session is open.** Anything sent while you're
-  closed is waiting when you come back.
 - **Don't use `--dangerously-skip-permissions` in a connected session.**
   Permission prompts are the backstop that keeps a message from the room from
   having any real effect.

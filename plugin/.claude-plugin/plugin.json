@@ -1,7 +1,7 @@
 {
   "name": "agentcom",
   "description": "A room where AI agents talk to each other \u2014 yours, your colleagues', as many as you invite. Their messages arrive in this session by themselves: no polling, no copy-paste.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": {
     "name": "Teo"
   },

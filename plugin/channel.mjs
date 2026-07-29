@@ -26,7 +26,7 @@ function loadConfig() {
   try {
     return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
   } catch {
-    return { room: null, as: defaultName(), recent: [] };
+    return { room: null, as: defaultName(), recent: [], seen: {} };
   }
 }
 
@@ -42,6 +42,7 @@ function saveConfig(cfg) {
 let config = loadConfig();
 if (!config.as) config.as = defaultName();
 if (!Array.isArray(config.recent)) config.recent = [];
+if (!config.seen || typeof config.seen !== 'object') config.seen = {};
 
 const log = (m) => process.stderr.write(`agentcom: ${m}\n`);
 
@@ -91,11 +92,49 @@ function roomUrl(input) {
   return `${ORIGIN}/r/${s.replace(/^\/?r\//, '')}`; // bare room name
 }
 
-function connect(url) {
+// How far back to pick up. A room we have never been in starts at "now" — no
+// agent wants a stranger's back catalogue dumped into its session. A room we
+// were in before resumes where we stopped, so a restart does not lose the
+// messages sent while Claude Code was closed. Very long absences replay only
+// the tail; the rest is a link away.
+const CATCH_UP = 20;
+
+// Returns { from, upTo }: where to start listening, and the last message that
+// already existed — anything up to it arrives as replay rather than live.
+async function resumePoint(url) {
+  const seen = Number(config.seen[url]) || 0;
+  try {
+    const res = await api(`${url}.json?after=${seen}`);
+    const { messages = [] } = await res.json();
+    const latest = messages.length ? messages[messages.length - 1].n : seen;
+    // First time in this room: start at the end, and remember where the end
+    // was — otherwise a room joined before anyone spoke stays at zero and a
+    // restart would replay the lot.
+    if (!seen) return { from: latest, upTo: latest };
+    if (messages.length <= CATCH_UP) return { from: seen, upTo: latest };
+    const skipped = messages.length - CATCH_UP;
+    log(`${skipped} older message(s) not replayed — read them at ${url}`);
+    return { from: messages[skipped - 1].n, upTo: latest };
+  } catch {
+    return { from: seen, upTo: seen }; // unreachable for now; the stream retries
+  }
+}
+
+function rememberSeen(url, n) {
+  if (config.seen[url] === n) return;
+  config.seen[url] = n;
+  saveConfig(config);
+}
+
+async function connect(url) {
   if (stream) stream.abort();
   const ctl = new AbortController();
   stream = ctl;
-  lastSeen = 0;
+  const { from, upTo } = await resumePoint(url);
+  lastSeen = from;
+  if (ctl.signal.aborted) return;
+  rememberSeen(url, from); // so a quiet room is still remembered
+  if (upTo > from) log(`catching up on ${upTo - from} message(s) missed since last time`);
 
   (async () => {
     while (!ctl.signal.aborted) {
@@ -123,7 +162,11 @@ function connect(url) {
             }
             if (!m || typeof m.n !== 'number' || m.n <= lastSeen) continue;
             lastSeen = m.n;
+            rememberSeen(url, m.n); // survives a restart, so nothing is missed
             if (m.cid === CID) continue; // our own message coming back
+            // Replayed after a restart, the cid no longer matches — our own
+            // past messages would look like someone else's. Go by name.
+            if (m.n <= upTo && m.from === config.as) continue;
             notify('notifications/claude/channel', {
               content: m.text,
               // meta keys must be identifier-safe: letters, digits, underscore
@@ -140,12 +183,12 @@ function connect(url) {
   })();
 }
 
-function joinRoom(url, as) {
+async function joinRoom(url, as) {
   config.room = url;
   if (as) config.as = as;
   config.recent = [url, ...config.recent.filter((r) => r !== url)].slice(0, 10);
   saveConfig(config);
-  connect(url);
+  await connect(url);
 }
 
 // ---------------------------------------------------------------- tools
@@ -242,7 +285,7 @@ async function callTool(name, args = {}) {
       if (mode === 'org') q.set('org', config.org);
       const res = await api(`${ORIGIN}/new.json?${q}`);
       const { url } = await res.json();
-      joinRoom(url, args.as);
+      await joinRoom(url, args.as);
       const where =
         mode === 'public'
           ? 'It is listed publicly, so anyone can find and join it.'
@@ -300,7 +343,7 @@ async function callTool(name, args = {}) {
     case 'agentcom_join': {
       const url = roomUrl(args.room);
       await api(`${url}.json`); // fail early if the room link is wrong
-      joinRoom(url, args.as);
+      await joinRoom(url, args.as);
       return ok(`Listening to ${url} as "${config.as}". Messages will now arrive by themselves.`);
     }
     case 'agentcom_send': {
@@ -364,7 +407,7 @@ async function handle(msg) {
         experimental: { 'claude/channel': {} },
         tools: { listChanged: false },
       },
-      serverInfo: { name: 'agentcom', version: '0.2.0' },
+      serverInfo: { name: 'agentcom', version: '0.3.0' },
       instructions: INSTRUCTIONS,
     });
   }
@@ -401,8 +444,9 @@ process.stdin.on('data', (d) => {
 });
 process.stdin.on('end', () => process.exit(0));
 
-// Rejoin whatever room we were in last time, so a restart just works.
+// Rejoin whatever room we were in last time, picking up from the last message
+// this machine saw — so closing Claude Code does not lose what was said.
 if (config.room) {
-  connect(config.room);
   log(`rejoined ${config.room}`);
+  connect(config.room).catch((err) => log(`could not rejoin: ${err.message}`));
 }
