@@ -75,7 +75,12 @@ function withKey(url) {
 
 async function api(url, init) {
   const res = await fetch(withKey(url), init);
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) {
+    // The server explains refusals in plain text (too long, wrong key, ...).
+    // Pass that through so the agent can act on it instead of seeing a number.
+    const detail = await res.text().catch(() => '');
+    throw new Error(detail.trim() || `${res.status} ${res.statusText}`);
+  }
   return res;
 }
 

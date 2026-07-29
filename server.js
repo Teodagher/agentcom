@@ -15,7 +15,8 @@ const ROOMS_DIR = path.join(DATA_DIR, 'rooms');
 const ORGS_DIR = path.join(DATA_DIR, 'orgs');
 const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN || `http://localhost:${PORT}`;
 
-const MAX_TEXT = 8000;
+const MAX_TEXT = 32000;
+const MAX_BODY = 262144; // 256 KB — comfortably above MAX_TEXT plus JSON overhead
 const MAX_NAME = 60;
 const MAX_CID = 64;
 const MAX_MSGS = 5000;
@@ -1047,6 +1048,9 @@ with that room's address.</pre></div>`,
 
 // ---------------------------------------------------------------- server
 
+// Resolves to { data, tooBig }. A body over the limit is reported, never
+// silently cut: a half a message is worse than a refused one, because the
+// sender believes it arrived whole.
 function readBody(req) {
   return new Promise((resolve) => {
     let data = '';
@@ -1054,13 +1058,13 @@ function readBody(req) {
     req.on('data', (c) => {
       if (tooBig) return;
       data += c;
-      if (data.length > 64_000) {
+      if (data.length > MAX_BODY) {
         tooBig = true;
-        data = data.slice(0, 64_000);
+        data = '';
       }
     });
-    req.on('end', () => resolve(data));
-    req.on('error', () => resolve(data));
+    req.on('end', () => resolve({ data, tooBig }));
+    req.on('error', () => resolve({ data, tooBig }));
   });
 }
 
@@ -1069,7 +1073,20 @@ async function handleSay(req, res, id, params, isPost) {
     return send(res, 429, 'text/plain; charset=utf-8', 'Too many messages — slow down and try again in a minute.\n');
   }
   const from = clean(params.as || params.from || params.name, MAX_NAME) || 'unnamed agent';
-  const text = clean(params.text || params.message || params.msg, MAX_TEXT);
+  const raw = params.text || params.message || params.msg;
+  // Say no rather than deliver half a message. Silently cutting it left the
+  // sender thinking it went through whole and the room reading a sentence
+  // that stops mid-word.
+  if (String(raw == null ? '' : raw).length > MAX_TEXT) {
+    return send(
+      res,
+      413,
+      'text/plain; charset=utf-8',
+      `Message too long: ${String(raw).length} characters, the limit is ${MAX_TEXT}.\n` +
+        `Nothing was posted. Send it as several messages instead.\n`
+    );
+  }
+  const text = clean(raw, MAX_TEXT);
   const cid = clean(params.cid, MAX_CID);
   const wait = Math.min(MAX_WAIT, Math.max(0, Number(params.wait) || 0));
 
@@ -1164,7 +1181,8 @@ const server = http.createServer(async (req, res) => {
   // Create one. The key is shown exactly once; we only ever store its hash.
   if (pathname === '/org/new') {
     if (req.method !== 'POST') return send(res, 405, 'text/plain; charset=utf-8', 'POST a name to create an organisation.\n');
-    const raw = await readBody(req);
+    const { data: raw, tooBig } = await readBody(req);
+    if (tooBig) return send(res, 413, 'text/plain; charset=utf-8', 'That request body is too large.\n');
     let body = {};
     try {
       const parsed = JSON.parse(raw);
@@ -1288,7 +1306,15 @@ const server = http.createServer(async (req, res) => {
     if (!validRoomId(id)) return send(res, 400, 'text/plain; charset=utf-8', 'Bad room name\n');
 
     if (req.method === 'POST') {
-      const raw = await readBody(req);
+      const { data: raw, tooBig } = await readBody(req);
+      if (tooBig) {
+        return send(
+          res,
+          413,
+          'text/plain; charset=utf-8',
+          `That message is too large — the limit is ${MAX_TEXT} characters.\nNothing was posted. Send it as several messages instead.\n`
+        );
+      }
       let body = {};
       try {
         const parsed = JSON.parse(raw);
