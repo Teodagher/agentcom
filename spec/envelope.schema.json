@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/teodagher/agentcom/blob/main/spec/envelope.schema.json",
+  "title": "AgentCom Protocol v1 (1.0.0-rc.1)",
+  "description": "The draft a client sends (POST /v1/messages) and the envelope a mailbox returns. Normative text: SPEC.md §3.",
+  "$defs": {
+    "address": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,30}:[A-Za-z0-9._@-]{1,128}$" },
+    "uuid": { "type": "string", "pattern": "^[0-9a-fA-F-]{36}$" },
+    "act": { "enum": ["request", "reply", "inform", "propose", "accept", "reject", "followup", "close"] },
+    "namespace": { "type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,40}$" },
+    "ext": {
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/namespace" },
+      "additionalProperties": { "type": "object" },
+      "description": "One object per namespace, 8000 characters max serialised. Keys named like a core field are dropped."
+    },
+    "subject": { "type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9_-]*:[^\\s]{1,200}$" },
+    "reason": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,60}$" },
+    "draft": {
+      "type": "object",
+      "required": ["cid", "to", "act", "text"],
+      "not": { "required": ["from"] },
+      "properties": {
+        "cid": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "to": { "$ref": "#/$defs/address" },
+        "act": { "$ref": "#/$defs/act" },
+        "text": { "type": "string", "minLength": 1, "maxLength": 4000, "pattern": "\\S" },
+        "thread": { "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
+        "in_reply_to": { "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] },
+        "subject": { "oneOf": [{ "$ref": "#/$defs/subject" }, { "type": "null" }] },
+        "title": { "oneOf": [{ "type": "string", "maxLength": 80 }, { "type": "null" }] },
+        "due": { "oneOf": [{ "type": "string", "format": "date-time" }, { "type": "null" }] },
+        "ext": { "$ref": "#/$defs/ext" },
+        "ext_required": { "type": "array", "items": { "$ref": "#/$defs/namespace" } },
+        "reason": { "oneOf": [{ "$ref": "#/$defs/reason" }, { "type": "null" }] }
+      },
+      "allOf": [
+        { "if": { "properties": { "act": { "enum": ["reply", "accept", "reject", "followup", "close"] } } }, "then": { "required": ["thread"], "properties": { "thread": { "$ref": "#/$defs/uuid" } } } },
+        { "if": { "required": ["reason"], "properties": { "reason": { "type": "string" } } }, "then": { "properties": { "act": { "const": "reject" } } } }
+      ]
+    },
+    "envelope": {
+      "type": "object",
+      "required": ["v", "id", "n", "cid", "from", "to", "act", "thread", "text", "at"],
+      "properties": {
+        "v": { "type": "string", "pattern": "^agentcom/1($|[-.])" },
+        "id": { "type": "string", "minLength": 1 },
+        "n": { "type": "integer", "minimum": 1 },
+        "cid": { "type": "string", "minLength": 1, "maxLength": 200 },
+        "from": { "$ref": "#/$defs/address" },
+        "to": { "$ref": "#/$defs/address" },
+        "act": { "type": "string", "description": "A v1 act, or one from a newer minor version (auto-reject act_not_understood)." },
+        "thread": { "type": "string" },
+        "in_reply_to": { "type": ["string", "null"] },
+        "subject": { "type": ["string", "null"] },
+        "title": { "type": ["string", "null"], "maxLength": 80 },
+        "text": { "type": "string", "maxLength": 4000 },
+        "due": { "type": ["string", "null"] },
+        "ext": { "$ref": "#/$defs/ext" },
+        "ext_required": { "type": "array", "items": { "type": "string" } },
+        "reason": { "type": ["string", "null"] },
+        "at": { "type": "string", "format": "date-time" }
+      }
+    }
+  },
+  "oneOf": [{ "$ref": "#/$defs/draft" }, { "$ref": "#/$defs/envelope" }]
+}
