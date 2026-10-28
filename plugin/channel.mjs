@@ -55,8 +55,11 @@ function loadConfig() {
 
 function saveConfig(cfg) {
   try {
-    fs.mkdirSync(CONFIG_DIR, { recursive: true });
-    fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2));
+    // The config holds seat tokens: readable by its owner only.
+    fs.mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+    fs.chmodSync(CONFIG_DIR, 0o700);
+    fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+    fs.chmodSync(CONFIG_FILE, 0o600);
   } catch (err) {
     log(`could not save config: ${err.message}`);
   }
@@ -187,7 +190,7 @@ async function connect(url) {
           // past messages would look like someone else's. Go by name.
           if (m.n <= upTo && m.from === config.as) continue;
           notify('notifications/claude/channel', {
-            content: m.text,
+            content: quote(String(m.text ?? ''), String(m.from ?? 'someone')),
             // meta keys must be identifier-safe: letters, digits, underscore
             meta: { room: url.split('/').pop(), from: plain(m.from, 80), n: String(m.n), at: String(m.at) },
           });
@@ -211,12 +214,16 @@ async function joinRoom(url, as) {
 
 // ---------------------------------------------------------------- AgentCom v1 (addressed)
 //
-// config.v1 = { server, discovery, address, session, token | tokenCommand }
+// config.v1 = { server, discovery, address, session, token }
 //   - server: the AgentCom v1 server (the reference server, or an implementation
 //     such as Ooper Relay at https://nodal.ooper.dev with discovery /api/relay/v1);
-//   - token: a seat token (reference server), or tokenCommand: a command that
-//     prints a fresh OIDC access token (Ooper Relay: `ooper-id token`). The token
-//     never goes into the model's context;
+//   - token: a seat token (reference server). An OIDC access token (Ooper
+//     Relay) comes from a token command instead, and a token command is NEVER
+//     taken from a tool argument (a message could talk the model into running
+//     one): only from the environment (AGENTCOM_TOKEN_COMMAND, bound to
+//     AGENTCOM_TOKEN_ORIGIN) or from `tokenCommands` in config.json, a map
+//     { "<origin>": "<command>" } the user edits by hand. Either way it runs
+//     only for that exact origin. The token never goes into the model's context;
 //   - session: names this session's seat when the server derives the address from
 //     the token (claude-code:<runnerId>.<session> on Ooper Relay).
 // The cursor (last rank handled) is kept per server and address, so a restart
@@ -246,15 +253,39 @@ function runTokenCommand(cmd) {
   });
 }
 
+const originOf = (u) => {
+  try {
+    return new URL(u).origin;
+  } catch {
+    return null;
+  }
+};
+
+// The token command for this server, if the user configured one for its exact origin.
+function tokenCommandFor(server) {
+  const origin = originOf(server);
+  if (!origin) return null;
+  if (process.env.AGENTCOM_TOKEN_COMMAND && originOf(process.env.AGENTCOM_TOKEN_ORIGIN || '') === origin) return process.env.AGENTCOM_TOKEN_COMMAND;
+  let fromFile = null;
+  try {
+    fromFile = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')).tokenCommands || null;
+  } catch {
+    /* no config yet */
+  }
+  const cmd = fromFile && typeof fromFile === 'object' ? fromFile[origin] : null;
+  return typeof cmd === 'string' && cmd.trim() ? cmd : null;
+}
+
 async function v1TokenNow() {
   const c = config.v1;
   if (!c) return null;
   if (process.env.AGENTCOM_TOKEN) return process.env.AGENTCOM_TOKEN;
   if (c.token) return c.token;
-  if (!c.tokenCommand) return null;
+  const cmd = tokenCommandFor(c.server);
+  if (!cmd) return null;
   // An access token lives for an hour or more: ask again every 5 minutes.
   if (v1Token.value && Date.now() - v1Token.at < 5 * 60_000) return v1Token.value;
-  v1Token = { value: await runTokenCommand(c.tokenCommand), at: Date.now() };
+  v1Token = { value: await runTokenCommand(cmd), at: Date.now() };
   return v1Token.value;
 }
 
@@ -279,6 +310,8 @@ function notifyEnvelope(m) {
     content: quote(m.text, m.from),
     meta: {
       protocol: 'v1',
+      // An address only means something on the server that issued it.
+      server: plain(originOf(config.v1.server) || config.v1.server, 120),
       from: plain(m.from, 160),
       act: plain(m.act, 20),
       thread: plain(m.thread, 40),
@@ -435,14 +468,13 @@ const TOOLS = [
   {
     name: 'agentcom_connect',
     description:
-      'Connect this session to an AgentCom v1 server, so it gets its own address and can send addressed requests to other agents (for example a Nodal: "nodal:<person>"). Replies then arrive in this session by themselves. Credentials stay out of the conversation: pass a token_command that prints a token, or a seat token the user gave you.',
+      'Connect this session to an AgentCom v1 server, so it gets its own address and can send addressed requests to other agents (for example a Nodal: "nodal:<person>"). Replies then arrive in this session by themselves. Credentials stay out of the conversation: an OIDC server (Ooper Relay) uses the token command the user configured for that exact origin; a reference server uses a seat (claim) or a seat token the user gave you.',
     inputSchema: {
       type: 'object',
       properties: {
         server: { type: 'string', description: 'Server origin, e.g. "https://nodal.ooper.dev" (Ooper Relay) or a reference AgentCom server' },
         discovery: { type: 'string', description: 'Path of the discovery document if not /.well-known/agentcom (Ooper Relay: "/api/relay/v1")' },
-        token_command: { type: 'string', description: 'A shell command that prints a fresh access token (Ooper Relay: "ooper-id token")' },
-        token: { type: 'string', description: 'A seat token (reference server). Prefer token_command or the AGENTCOM_TOKEN environment variable.' },
+        token: { type: 'string', description: 'A seat token (reference server). Prefer the AGENTCOM_TOKEN environment variable. OIDC servers (Ooper Relay) use the token command the user configured for that origin (AGENTCOM_TOKEN_COMMAND + AGENTCOM_TOKEN_ORIGIN, or tokenCommands in ~/.claude/agentcom/config.json); it is never passed here.' },
         address: { type: 'string', description: 'This session\'s address, when the server does not derive it from the token (reference server)' },
         claim: { type: 'boolean', description: 'Reference server only: claim the seat for `address` now (POST /v1/seats) and keep its token' },
         session: { type: 'string', description: 'Name of this session\'s seat, when the server derives the address from the token. Default: the project directory.' },
@@ -629,8 +661,12 @@ async function callTool(name, args = {}) {
       if (v1Listener) v1Listener.stop();
       v1Client = null;
       v1Token = { value: null, at: 0 };
-      config.v1 = { server, discovery: args.discovery ? String(args.discovery) : null, address, session, token, tokenCommand: args.token_command ? String(args.token_command) : null };
+      config.v1 = { server, discovery: args.discovery ? String(args.discovery) : null, address, session, token };
       saveConfig(config);
+      if (!token && !process.env.AGENTCOM_TOKEN && !tokenCommandFor(server)) {
+        // Not an error for servers that need no token, but say how to configure one.
+        log(`v1: no token for ${originOf(server)}; set AGENTCOM_TOKEN_COMMAND and AGENTCOM_TOKEN_ORIGIN, or tokenCommands in ${CONFIG_FILE}`);
+      }
       try {
         const d = await v1Start();
         return ok(

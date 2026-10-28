@@ -1,8 +1,10 @@
 // The HTTP client: send with POST (idempotent by cid), read one's mailbox by long-poll or SSE with resume after the
 // cursor `n`, acknowledge, read a thread, hand a thread over to one's human. No dependency: global fetch.
-import { AgentComError, SPEC_VERSION, isTooLong, normalizeEnvelope, validateDraft } from "./envelope.js";
+import { AgentComError, SPEC_VERSION, isTooLong, normalizeEnvelope, validateDraft, validateEnvelope } from "./envelope.js";
 import { DEFAULT_ENDPOINTS, assertCompatible } from "./capabilities.js";
 import { readSse } from "./sse.js";
+/** A connection held at least this long counts as healthy (resets the backoff) even without events. */
+const HELD_MS = 10_000;
 const sleep = (ms, signal) => new Promise((resolve) => {
     if (signal?.aborted)
         return resolve();
@@ -27,6 +29,12 @@ export class AgentComClient {
     async negotiate() {
         const d = await this.call("GET", this.opts.discovery ?? "/.well-known/agentcom", undefined, { auth: false });
         assertCompatible(d);
+        /* A discovery document never sends the client (and its token) to another origin: endpoints are absolute paths. */
+        for (const [k, v] of Object.entries(d.endpoints ?? {})) {
+            if (typeof v !== "string" || !v.startsWith("/") || v.startsWith("//") || /[\\\s]/.test(v)) {
+                throw new AgentComError("forbidden", `The discovery document's endpoint "${k}" must be a path on ${this.baseUrl}, got ${JSON.stringify(v).slice(0, 80)}.`);
+            }
+        }
         this.discovery = d;
         this.endpoints = { ...DEFAULT_ENDPOINTS, ...(d.endpoints ?? {}), ...(this.opts.endpoints ?? {}) };
         return d;
@@ -51,7 +59,7 @@ export class AgentComClient {
             this.address = r.address;
         return {
             address: typeof r.address === "string" ? r.address : null,
-            messages: (r.messages ?? []).map((m) => normalizeEnvelope(m)),
+            messages: (r.messages ?? []).filter((m) => validateEnvelope(m).length === 0).map((m) => normalizeEnvelope(m)),
             last_n: typeof r.last_n === "number" ? r.last_n : null,
             acked_n: typeof r.acked_n === "number" ? r.acked_n : null,
         };
@@ -78,6 +86,11 @@ export class AgentComClient {
         const res = await this.raw("GET", `${this.path("events")}?${q}`, undefined, { signal: o.signal, accept: "text/event-stream", lastEventId: o.after });
         if (!res.ok)
             throw await this.toError(res);
+        /* A 200 that is not an event stream (a proxy page, JSON) is an error, not an empty stream to reconnect to at once. */
+        if (!/^text\/event-stream/i.test(res.headers.get("content-type") ?? "")) {
+            await res.body?.cancel().catch(() => { });
+            throw new AgentComError("not_found", `The events endpoint did not answer with text/event-stream (${res.headers.get("content-type") ?? "no content type"}).`, 501);
+        }
         if (!res.body)
             throw new AgentComError("not_found", "The server returned no event stream.", res.status);
         for await (const ev of readSse(res.body)) {
@@ -90,8 +103,10 @@ export class AgentComClient {
             catch {
                 continue;
             }
-            if (m && typeof m === "object" && typeof m.n === "number")
-                yield normalizeEnvelope(m);
+            /* Only readable envelopes (a positive integer rank, addresses, thread…): never a NaN cursor. */
+            if (validateEnvelope(m).length)
+                continue;
+            yield normalizeEnvelope(m);
         }
     }
     /**
@@ -109,7 +124,7 @@ export class AgentComClient {
         let delay = base;
         let transport = o.transport ?? "auto";
         const handle = async (m) => {
-            if (m.n <= cursor)
+            if (!Number.isInteger(m.n) || m.n <= cursor)
                 return;
             await handler(m);
             cursor = m.n;
@@ -120,11 +135,16 @@ export class AgentComClient {
         const loop = async () => {
             while (!ctl.signal.aborted) {
                 try {
+                    /* Backoff resets only after a productive round: at least one event, or a connection held long enough. A
+                       server (or proxy) that answers at once with nothing would otherwise be hammered in a tight loop. */
+                    const started = Date.now();
+                    let got = 0;
                     if (transport === "poll") {
                         const r = await this.inbox({ after: cursor, wait: 25, signal: ctl.signal });
                         for (const m of r.messages) {
                             if (ctl.signal.aborted)
                                 return;
+                            got++;
                             await handle(m);
                         }
                     }
@@ -132,12 +152,19 @@ export class AgentComClient {
                         for await (const m of this.events({ after: cursor, signal: ctl.signal })) {
                             if (ctl.signal.aborted)
                                 return;
+                            got++;
                             await handle(m);
                         }
                     }
-                    delay = base;
-                    if (transport !== "poll")
-                        await sleep(250, ctl.signal); // the server closed the stream: reconnect promptly
+                    if (got > 0 || Date.now() - started >= HELD_MS) {
+                        delay = base;
+                        if (transport !== "poll")
+                            await sleep(250, ctl.signal);
+                    }
+                    else {
+                        await sleep(delay, ctl.signal);
+                        delay = Math.min(delay * 2, 30_000);
+                    }
                 }
                 catch (e) {
                     if (ctl.signal.aborted)

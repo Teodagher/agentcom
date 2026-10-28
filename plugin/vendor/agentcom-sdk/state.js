@@ -66,6 +66,9 @@ export function applyMessage(thread, m) {
         }
         return { state: thread.state, followups: thread.followups + 1 };
     }
+    if ((m.act === "reply" || m.act === "accept" || m.act === "reject") && thread.recipient !== m.from) {
+        throw new AgentComError("forbidden", `Only the recipient of the thread may send a "${m.act}".`);
+    }
     if (m.act === "close" && thread.recipient === m.from && OPEN_STATES.includes(thread.state) && FOLLOWABLE_KINDS.includes(thread.kind)) {
         throw new AgentComError("invalid_transition", 'Closing an unanswered request needs a reason: send a "reject" with reason "closed_without_answer" instead.');
     }

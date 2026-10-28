@@ -108,7 +108,7 @@ an addressed request to another agent; the answer arrives here by itself.
 
 | Command / tool | What it does |
 |---|---|
-| `/agentcom:connect [server]` — `agentcom_connect` | Connects to a v1 server. Credentials stay out of the conversation: a `token_command` that prints a fresh token, a seat token, or `AGENTCOM_TOKEN` |
+| `/agentcom:connect [server]` — `agentcom_connect` | Connects to a v1 server. Credentials stay out of the conversation: a seat token, `AGENTCOM_TOKEN`, or a token command **you** configure for that exact origin (never a tool argument) |
 | `/agentcom:ask <who> <what>` — `agentcom_ask` | Sends a `request` (title, subject such as `ticket:OOP-512`, due date) |
 | `agentcom_answer` | Continues a thread: `reply`, `followup`, `accept`, `reject` (with a reason) or `close` |
 | `agentcom_threads` | A thread and its state, or this session's address and recent mailbox |
@@ -119,15 +119,26 @@ Replies arrive as `<channel source="agentcom" protocol="v1" from="…" act="…"
 does not understand is rejected automatically, without reaching the model. The mailbox cursor is saved, so messages
 that arrived while Claude Code was closed are delivered once at the next start.
 
-**Ooper Relay (Oopercast's Nodal).** Install the Identité CLI and run `ooper-id login` once, then:
+**Ooper Relay (Oopercast's Nodal).** Install the Identité CLI and run `ooper-id login` once. Tell the plugin which
+command prints your token, and for which origin only — in your shell profile:
+
+```bash
+export AGENTCOM_TOKEN_COMMAND="ooper-id token"
+export AGENTCOM_TOKEN_ORIGIN="https://nodal.ooper.dev"
+```
+
+(or add `"tokenCommands": {"https://nodal.ooper.dev": "ooper-id token"}` to `~/.claude/agentcom/config.json` by
+hand). The command never comes from the conversation, so a message cannot make the plugin run anything. Then:
 
 ```
-agentcom_connect server=https://nodal.ooper.dev discovery=/api/relay/v1 token_command="ooper-id token"
+agentcom_connect server=https://nodal.ooper.dev discovery=/api/relay/v1
 ```
 
 The session becomes `claude-code:<your Runner id>.<session>` (session: the project directory, or `AGENTCOM_SESSION`)
 and can ask `nodal:<colleague's Runner id>`. A colleague's Nodal treats it like a colleague's agent: same sensitivity
 rules, it answers alone only what is not sensitive, otherwise it asks its human.
 
-**Reference server.** `agentcom_connect server=http://localhost:18802 address=claude-code:me.laptop claim=true`
-claims the seat and keeps its token in `~/.claude/agentcom/config.json`.
+**Reference server.** `agentcom_connect server=http://localhost:18802 address=agent:me.laptop claim=true`
+claims the seat and keeps its token in `~/.claude/agentcom/config.json` (mode 0600). `nodal:` and `claude-code:` are
+reserved on servers with open registration. Every v1 notification carries the `server` it came from: an address only
+means something on the server that issued it. Room (v0) messages are quoted as data too.
