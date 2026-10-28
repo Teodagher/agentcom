@@ -315,6 +315,19 @@ export async function runConformance(o: ConformanceOptions): Promise<Conformance
     await A().send({ ...act.request(addr(1), "One more thing"), thread: q.thread });
     assert((await A().thread(q.thread)).thread.state === "sent", "not reopened");
   });
+  await check(2, "only the recipient answers: a reply, accept or reject from the requester → 403 forbidden", async () => {
+    const q = await open();
+    for (const a of ["reply", "accept", "reject"] as const) {
+      await rawRefused(0, { cid: `self:${a}:${rand()}`, to: addr(1), act: a, thread: q.thread, in_reply_to: q.id, text: "answering myself", ...(a === "reject" ? { reason: "declined" } : {}) }, "forbidden", 403);
+    }
+    assert((await A().thread(q.thread)).thread.state === "sent", "the thread moved");
+  });
+  await check(2, "in_reply_to must name a message of the thread → 400 invalid_envelope", async () => {
+    const q = await open();
+    const other = await open("another request");
+    await rawRefused(1, { cid: `irt:${rand()}`, to: addr(0), act: "reply", thread: q.thread, in_reply_to: other.id, text: "wrong target" }, "invalid_envelope", 400);
+    await rawRefused(1, { cid: `irt2:${rand()}`, to: addr(0), act: "reply", thread: q.thread, in_reply_to: "00000000-0000-4000-8000-000000000000", text: "unknown target" }, "invalid_envelope", 400);
+  });
   await check(2, "reason only on a reject → 400 invalid_envelope", async () => {
     const q = await open();
     await rawRefused(1, { ...act.reply(q, "with reason"), reason: "declined" }, "invalid_envelope", 400);

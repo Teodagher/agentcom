@@ -16,9 +16,9 @@ before(async () => { s = await startServer(); });
 after(async () => { await s?.stop(); });
 
 test("negotiate, send, receive by SSE, reply, resume after a reconnect", async () => {
-  const a = await seat(s.url, "claude-code:teo.laptop");
-  const b = await seat(s.url, "nodal:gaspard");
-  assert.equal((await fetch(`${s.url}/v1/seats`, { method: "POST", body: JSON.stringify({ address: "nodal:gaspard" }) })).status, 409);
+  const a = await seat(s.url, "agent:teo.laptop");
+  const b = await seat(s.url, "colleague:gaspard");
+  assert.equal((await fetch(`${s.url}/v1/seats`, { method: "POST", body: JSON.stringify({ address: "colleague:gaspard" }) })).status, 409);
   const A = new AgentComClient({ baseUrl: s.url, token: a.token, address: a.address });
   const B = new AgentComClient({ baseUrl: s.url, token: () => b.token, address: b.address });
   const d = await A.negotiate();
@@ -33,7 +33,7 @@ test("negotiate, send, receive by SSE, reply, resume after a reconnect", async (
   for (let i = 0; i < 50 && !got.length; i++) await new Promise((r) => setTimeout(r, 50));
   l.stop();
   assert.equal(got[0].id, q.message.id);
-  assert.equal(got[0].from, "claude-code:teo.laptop");
+  assert.equal(got[0].from, "agent:teo.laptop");
 
   const r = await B.send(reply(got[0], "Yes, Thursday 9am."));
   assert.equal(r.thread.state, "replied");
@@ -108,4 +108,89 @@ test("conformance: the reference server passes levels 0 to 3", async () => {
   if (!report.ok) console.log(formatReport(report));
   assert.deepEqual(report.passed, [0, 1, 2, 3]);
   assert.equal(report.results.filter((r) => !r.ok).length, 0);
+});
+
+test("reserved spaces: open registration cannot claim nodal: or claude-code:", async () => {
+  for (const address of ["nodal:gaspard", "claude-code:teo.laptop"]) {
+    const r = await fetch(`${s.url}/v1/seats`, { method: "POST", body: JSON.stringify({ address }) });
+    assert.equal(r.status, 403);
+    assert.equal((await r.json()).error, "forbidden");
+  }
+  assert.deepEqual((await (await fetch(`${s.url}/.well-known/agentcom`)).json()).reserved_spaces, ["nodal", "claude-code"]);
+});
+
+test("a malformed percent-escape is a 400, never a crash", async () => {
+  for (const p of ["/v1/mailbox/%E0", "/r/%E0", "/%"]) assert.equal((await fetch(`${s.url}${p}`)).status, 400);
+  assert.equal((await fetch(`${s.url}/health`)).status, 200);
+});
+
+test("a torn last line (crash mid-append) is cut at start: no seat lost, no rank reused (v1 and v0)", async () => {
+  const { appendFileSync, readFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const s2 = await startServer();
+  const bob = await seat(s2.url, "torn:bob");
+  const { room } = await (await fetch(`${s2.url}/new.json`)).json();
+  const post0 = async (u) => (await (await fetch(`${u}/r/${room}`, { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, body: JSON.stringify({ as: "t", text: "x" }) })).json()).posted;
+  assert.equal(await post0(s2.url), 1);
+  await s2.stop({ keep: true });
+  appendFileSync(join(s2.dir, "v1", "log.jsonl"), '{"type":"send","message":{"v":"agentcom/1-dr');
+  appendFileSync(join(s2.dir, "rooms", `${room}.jsonl`), '{"n":2,"from":"t","te');
+  let s3 = await startServer({}, s2.dir);
+  const alice = await seat(s3.url, "torn:alice");
+  const A3 = new AgentComClient({ baseUrl: s3.url, token: alice.token, address: alice.address });
+  const m1 = await A3.send(request(bob.address, "q1"));
+  assert.equal(m1.message.n, 1);
+  assert.equal(await post0(s3.url), 2);
+  await s3.stop({ keep: true });
+  assert.ok(readFileSync(join(s2.dir, "v1", "log.jsonl"), "utf8").endsWith("\n"));
+  s3 = await startServer({}, s2.dir);
+  try {
+    const A4 = new AgentComClient({ baseUrl: s3.url, token: alice.token, address: alice.address });
+    assert.equal((await A4.send(request(bob.address, "q2"))).message.n, 2);   // alice's seat survived, n continues
+    const steal = await fetch(`${s3.url}/v1/seats`, { method: "POST", body: JSON.stringify({ address: "torn:alice" }) });
+    assert.equal(steal.status, 409);                                            // nobody can take it over
+    assert.equal(await post0(s3.url), 3);
+  } finally {
+    await s3.stop();
+  }
+});
+
+test("open streams are capped per seat (SSE and long-poll)", async () => {
+  const s2 = await startServer({ AGENTCOM_MAX_STREAMS_PER_SEAT: "2" });
+  try {
+    const a = await seat(s2.url, "cap:a");
+    const ctl = new AbortController();
+    const open = () => fetch(`${s2.url}/v1/mailbox/cap:a/events`, { headers: { authorization: `Bearer ${a.token}` }, signal: ctl.signal });
+    const r1 = await open(); const r2 = await open(); const r3 = await open();
+    assert.deepEqual([r1.status, r2.status, r3.status], [200, 200, 429]);
+    const poll = await fetch(`${s2.url}/v1/mailbox/cap:a?wait=2`, { headers: { authorization: `Bearer ${a.token}` } });
+    assert.equal(poll.status, 429);
+    ctl.abort();
+    await new Promise((r) => setTimeout(r, 200));
+    assert.equal((await fetch(`${s2.url}/v1/mailbox/cap:a?wait=0`, { headers: { authorization: `Bearer ${a.token}` } })).status, 200);
+  } finally {
+    await s2.stop();
+  }
+});
+
+test("retention: old messages leave memory and disk, ranks and seats stay", async () => {
+  const { readFileSync, writeFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const s2 = await startServer();
+  const a = await seat(s2.url, "ret:a"); const b = await seat(s2.url, "ret:b");
+  const A2 = new AgentComClient({ baseUrl: s2.url, token: a.token, address: a.address });
+  await A2.send(inform(b.address, "old"));
+  await s2.stop({ keep: true });
+  const log = join(s2.dir, "v1", "log.jsonl");
+  writeFileSync(log, readFileSync(log, "utf8").replace(/"at":"20\d\d-[^"]+"/g, '"at":"2020-01-01T00:00:00.000Z"'));
+  const s3 = await startServer({}, s2.dir);
+  try {
+    assert.ok(!readFileSync(log, "utf8").includes('"text":"old"'));
+    const B3 = new AgentComClient({ baseUrl: s3.url, token: b.token, address: b.address });
+    assert.deepEqual((await B3.inbox()).messages, []);
+    const A3 = new AgentComClient({ baseUrl: s3.url, token: a.token, address: a.address });
+    assert.equal((await A3.send(inform(b.address, "new"))).message.n, 2);
+  } finally {
+    await s3.stop();
+  }
 });

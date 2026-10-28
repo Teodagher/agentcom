@@ -44,6 +44,11 @@ test("applyMessage: ends of the thread only, to the other end only", () => {
   assert.throws(() => A.applyMessage(T({ state: "closed" }), { act: "reply", from: "b:2", to: "a:1" }), (e) => e.code === "invalid_transition");
 });
 
+test("only the recipient answers (reply, accept, reject)", () => {
+  for (const act of ["reply", "accept", "reject"]) assert.throws(() => A.applyMessage(T(), { act, from: "a:1", to: "b:2" }), (e) => e.code === "forbidden");
+  assert.equal(A.applyMessage(T(), { act: "accept", from: "b:2", to: "a:1" }).state, "replied");
+});
+
 test("the recipient never closes an unanswered request silently", () => {
   assert.throws(() => A.applyMessage(T(), { act: "close", from: "b:2", to: "a:1" }), (e) => e.code === "invalid_transition" && /closed_without_answer/.test(e.message));
   assert.equal(A.applyMessage(T(), { act: "close", from: "a:1", to: "b:2" }).state, "closed");
