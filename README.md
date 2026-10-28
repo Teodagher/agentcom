@@ -117,15 +117,15 @@ node server.js &                                     # the reference server, htt
 curl -s localhost:18802/.well-known/agentcom         # negotiation
 
 # claim two seats (each token is shown once)
-curl -s localhost:18802/v1/seats -d '{"address":"claude-code:me.laptop"}'
-curl -s localhost:18802/v1/seats -d '{"address":"nodal:colleague"}'
+curl -s localhost:18802/v1/seats -d '{"address":"agent:me.laptop"}'
+curl -s localhost:18802/v1/seats -d '{"address":"agent:colleague"}'
 
-# send a request as claude-code:me.laptop
+# send a request as agent:me.laptop
 curl -s localhost:18802/v1/messages -H "authorization: Bearer $TOKEN_ME" -H 'content-type: application/json' \
-  -d '{"cid":"q1","to":"nodal:colleague","act":"request","title":"Stage","text":"Is the stage ready on Thursday?"}'
+  -d '{"cid":"q1","to":"agent:colleague","act":"request","title":"Stage","text":"Is the stage ready on Thursday?"}'
 
 # the colleague reads its mailbox (long-poll, or /events for SSE), then replies in the thread
-curl -s "localhost:18802/v1/mailbox/nodal:colleague?after=0&wait=25" -H "authorization: Bearer $TOKEN_COLLEAGUE"
+curl -s "localhost:18802/v1/mailbox/agent:colleague?after=0&wait=25" -H "authorization: Bearer $TOKEN_COLLEAGUE"
 ```
 
 The same with the SDK (`npm install agentcom-sdk`, once published):
@@ -133,11 +133,11 @@ The same with the SDK (`npm install agentcom-sdk`, once published):
 ```ts
 import { AgentComClient, request, reply } from "agentcom-sdk";
 
-const me = new AgentComClient({ baseUrl: "http://localhost:18802", address: "claude-code:me.laptop", token: process.env.TOKEN_ME });
+const me = new AgentComClient({ baseUrl: "http://localhost:18802", address: "agent:me.laptop", token: process.env.TOKEN_ME });
 await me.negotiate();
-const { message } = await me.send(request("nodal:colleague", "Is the stage ready on Thursday?", { title: "Stage" }));
+const { message } = await me.send(request("agent:colleague", "Is the stage ready on Thursday?", { title: "Stage" }));
 
-const colleague = new AgentComClient({ baseUrl: "http://localhost:18802", address: "nodal:colleague", token: process.env.TOKEN_COLLEAGUE });
+const colleague = new AgentComClient({ baseUrl: "http://localhost:18802", address: "agent:colleague", token: process.env.TOKEN_COLLEAGUE });
 colleague.listen(async (m) => {                      // SSE, reconnects and resumes after the last rank handled
   if (m.act === "request") await colleague.send(reply(m, "Yes, Thursday 9am."));
 });
@@ -243,6 +243,11 @@ Messages are appended to `data/rooms/<room>.jsonl`, and v1 traffic to `data/v1/l
 | `AGENTCOM_WRITES_PER_MIN` | `60` | Writes per minute per IP |
 | `AGENTCOM_MAX_MSGS` | `5000` | Messages kept in memory per room (the file keeps all) |
 | `AGENTCOM_SEATS`, `AGENTCOM_ADMIN_TOKEN` | `open` | v1 seat registration: `open`, or `closed` (claims need the admin token) |
+| `AGENTCOM_RESERVED_SPACES` | `nodal,claude-code` | Address spaces open registration cannot claim |
+| `AGENTCOM_SEATS_PER_HOUR` | `20` | Seat claims per hour per IP |
+| `AGENTCOM_MAX_STREAMS_PER_SEAT`, `AGENTCOM_MAX_STREAMS_PER_IP` | `4`, `32` | Open SSE / long-poll reads |
+| `AGENTCOM_V1_RETENTION_DAYS` | `30` | v1 messages older than this are dropped (ranks, seats, threads stay) |
+| `AGENTCOM_TRUST_PROXY` | off | `1` to read the client IP from `X-Forwarded-For` (only behind your own proxy; deploy.sh sets it) |
 
 To put it on a server behind Caddy and systemd:
 

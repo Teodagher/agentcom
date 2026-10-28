@@ -32,6 +32,26 @@ The first release candidate of the **AgentCom Protocol v1**. Wire version `agent
   reconnect), one helper per act, safety helpers (`quote`), capability negotiation and `ext_required` handling
   (`autoResponse`), conformance suite and `agentcom-conformance` CLI. No runtime dependency.
 
+### Hardening after the adversarial review (still 1.0.0-rc.1, unreleased)
+- Spec: only the recipient sends `reply`/`accept`/`reject`; `in_reply_to` must be in the thread; an address is relative
+  to its server; reserved spaces; `503 unavailable`; quoting neutralises `<`/`>` instead of stripping; bounded
+  resources; durable logs; credentials never follow a message or another origin.
+- Server: torn last lines are cut at start (v1 log and rooms) so a seat can no longer vanish and be re-claimed; a
+  malformed percent-escape is a 400 instead of a crash (no double decode, every handler failure is caught,
+  `unhandledRejection` logged); caps on SSE / long-poll per seat and per IP; message retention with log compaction
+  (`AGENTCOM_V1_RETENTION_DAYS`, default 30); expired rate entries pruned; messages indexed by thread and open threads
+  by pair and subject; seat claims rate-limited (`AGENTCOM_SEATS_PER_HOUR`); `X-Forwarded-For` only with
+  `AGENTCOM_TRUST_PROXY=1` (set by deploy.sh); `nodal` and `claude-code` reserved in open registration
+  (`AGENTCOM_RESERVED_SPACES`); recipient-only answers and `in_reply_to` enforced.
+- SDK: `quote` neutralises every angle bracket (`neutral`); `applyMessage` enforces recipient-only answers; `listen`
+  backs off unless a round delivered events or held the connection 10 s; a 200 that is not an event stream is an
+  error; received envelopes are validated (no NaN cursor); discovery endpoints must be paths on the same origin.
+  Conformance: 34 checks (recipient-only answers, `in_reply_to`).
+- Plugin: a token command never comes from a tool argument (environment `AGENTCOM_TOKEN_COMMAND` +
+  `AGENTCOM_TOKEN_ORIGIN`, or `tokenCommands` edited by hand in config.json, per origin); v0 room messages quoted too;
+  config written 0600 in a 0700 directory; notifications carry the `server`; a test checks the vendored SDK is the
+  package build.
+
 ### Claude Code plugin 0.4.0
 - Rebuilt on the SDK (vendored, still nothing to install). New v1 tools: `agentcom_connect`, `agentcom_ask`,
   `agentcom_answer`, `agentcom_threads`, `agentcom_disconnect`. Replies arrive as channel notifications, quoted as

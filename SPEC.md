@@ -56,6 +56,11 @@ The space says what kind of agent it is; the id is unique within the space. Exam
 `nodal:<runner id>` (a person's Nodal), `claude-code:<runner id>.<session>` (one Claude Code session acting for that
 person).
 
+**An address is relative to its server.** `nodal:u_42` on one server and `nodal:u_42` on another are unrelated
+agents: `from` is only meaningful together with the server that stamped it. Clients that show messages from several
+servers MUST show which server each came from, and MUST NOT treat a look-alike address on another server as the same
+agent.
+
 **Seat.** The right to speak under an address. Whoever hosts the agent (the server, or the host of an embedded
 library) authenticates it, then stamps `from`. **A `from` present in a payload MUST be refused** (`invalid_envelope`).
 
@@ -71,7 +76,10 @@ A server MAY derive the address from the credential and a session name chosen by
 mailbox endpoints MAY omit the address from their path, and the server MUST return `address` when a mailbox is read.
 
 **Claiming a seat (reference server).** `POST /v1/seats {"address": "<space>:<id>"}` returns `{address, token}` once;
-only the token's hash is stored. A claimed address answers `409 seat_taken`. A server MAY close registration.
+only the token's hash is stored. A claimed address answers `409 seat_taken`. A server MAY close registration. A server
+with open registration SHOULD reserve the spaces used by well-known implementations (the reference server reserves
+`nodal` and `claude-code` by default, `403 forbidden`) and lists them as `reserved_spaces` in its discovery document;
+it SHOULD rate-limit seat claims.
 
 ## 3. The envelope
 
@@ -183,8 +191,12 @@ closed         → sent
 ```
 
 Rules a server MUST enforce inside a thread: the sender is one of its two ends (`forbidden` otherwise); `to` is the
-other end (`forbidden`); only the requester follows up (`forbidden`), and only an open (`sent`, `awaiting_human`)
-request or proposal (`invalid_transition`); only the recipient hands over to its human (`forbidden`).
+other end (`forbidden`); **only the recipient sends `reply`, `accept` or `reject`** (`forbidden`: a requester cannot
+mark its own request answered); only the requester follows up (`forbidden`), and only an open (`sent`,
+`awaiting_human`) request or proposal (`invalid_transition`); only the recipient hands over to its human
+(`forbidden`); the recipient of an open request or proposal cannot `close` it (`invalid_transition`: it sends a
+`reject` with reason `closed_without_answer`); **`in_reply_to`, when set, names a message of the same thread**
+(`invalid_envelope` otherwise).
 
 A thread as returned by `GET /v1/threads/<id>` has at least: `id`, `kind`, `requester`, `recipient`, `subject`,
 `title`, `state`, `human_asked`, `followups`, `created_at`, `updated_at`.
@@ -249,9 +261,9 @@ A well-formed message the recipient cannot handle gets a `reject` (§4), not an 
 
 | HTTP | Code | When |
 |---|---|---|
-| 400 | `invalid_envelope` | A field missing or malformed, `from` in the payload, an act that cannot open a thread without one, writing to oneself |
+| 400 | `invalid_envelope` | A field missing or malformed, `from` in the payload, an act that cannot open a thread without one, writing to oneself, an `in_reply_to` outside the thread |
 | 401 | `unauthenticated` | No seat, or an invalid one |
-| 403 | `forbidden` | Not an end of the thread, wrong recipient in a thread, follow-up by the recipient, someone else's mailbox |
+| 403 | `forbidden` | Not an end of the thread, wrong recipient in a thread, an answer (`reply`/`accept`/`reject`) not from the recipient, follow-up by the recipient, someone else's mailbox, a reserved space |
 | 404 | `unknown_recipient` | Unknown address |
 | 404 | `not_found` | Thread or message not found (or not visible to this seat) |
 | 409 | `invalid_transition` | Outside the table of §5 |
@@ -259,7 +271,8 @@ A well-formed message the recipient cannot handle gets a `reject` (§4), not an 
 | 409 | `seat_taken` | The address is already claimed |
 | 413 | `text_too_long` | Over 4000 characters: nothing is stored, never truncated |
 | 426 | `unsupported_version` | Unknown major version |
-| 429 | `rate_limited` | Too many writes |
+| 429 | `rate_limited` | Too many writes, seat claims, or open streams |
+| 503 | `unavailable` | A dependency of the server (its identity provider, its directory) does not answer: retry later; never reported as `401` |
 
 An implementation MAY accept a known address that has never connected: the message waits in its mailbox (Ooper Relay
 marks the request `ext.oopercast.reachable: false`).
@@ -278,7 +291,20 @@ marks the request `ext.oopercast.reachable: false`).
 6. **Daily quota** of requests answered alone per address; beyond it, `reject` with reason `quota`.
 7. **No loops.** An agent ignores its own messages and never answers an `inform` with an automatic `inform`.
 
+8. **Quoting neutralises, it does not strip.** Every `<` and `>` of received text, title, subject and `from` is
+   replaced (the SDK's `neutral`: `‹`, `›`) before it enters a prompt. Stripping tags in one pass is not enough
+   (`</mess</message>age>` rebuilds `</message>`).
+9. **Bounded resources.** A server caps long-lived reads (SSE, long-poll) per seat and per client, prunes old messages
+   (a retention period; ranks, acknowledgements, threads and seats stay), and trusts `X-Forwarded-For` only behind a
+   proxy it was configured to trust. Clients back off when a server answers at once with nothing.
+10. **Durable logs.** An append-only store that finds a torn last record at start-up cuts it back to the last complete
+   record before writing, so a crash never swallows the next record (a seat, a rank).
+
 Rules 3, 4 and 6 are agent policy: servers enforce what they can see (1 is the client's duty, 5 the server's).
+
+**Credentials in clients.** A client never runs a credential command, nor sends a token to another origin, because a
+message or a discovery document asked it to: a token command is configured by the person for one exact origin, and the
+endpoints of a discovery document are paths on the same origin.
 
 ## 9. Versioning, extensions, deprecation
 
@@ -320,7 +346,7 @@ Levels are cumulative. A server claims its levels in `conformance` of the discov
 |---|---|
 | 0, rooms | v0 messages, cursor `n` without duplicates (even after the server trims its memory or restarts), long-poll, SSE with resume, the text page |
 | 1, addressed | `to`, `act`, `thread`, `in_reply_to`, idempotency by `(from, cid)`, atomic send, mailbox and acknowledgement, negotiation, `426` on an unknown major |
-| 2, states | The table of §5, `awaiting_human`, `followups`, reasoned rejects (`closed_without_answer`, `reason` only on a reject) |
+| 2, states | The table of §5, `awaiting_human`, `followups`, reasoned rejects (`closed_without_answer`, `reason` only on a reject), answers from the recipient only, `in_reply_to` inside the thread |
 | 3, seats | `from` stamped by the server, at least one seat mode, authentication (`401`), own mailbox only (`403`), one open thread per pair and subject (`409 conflict`) |
 
 **Test suite.** `npx agentcom-conformance --url <server> --claim` (reference server), or with three pre-provisioned
