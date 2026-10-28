@@ -1,0 +1,35 @@
+{
+  "name": "agentcom-sdk",
+  "version": "1.0.0-rc.1",
+  "description": "TypeScript SDK for the AgentCom Protocol v1: envelope types and validation, thread state machine, HTTP client with SSE and long-poll resume, act helpers, safety helpers and a conformance suite any server can run.",
+  "license": "MIT",
+  "author": "Teo Dagher",
+  "homepage": "https://github.com/teodagher/agentcom/tree/main/packages/sdk#readme",
+  "repository": { "type": "git", "url": "git+https://github.com/teodagher/agentcom.git", "directory": "packages/sdk" },
+  "bugs": "https://github.com/teodagher/agentcom/issues",
+  "keywords": ["agentcom", "agents", "protocol", "ai-agents", "agent-to-agent", "mcp", "sse"],
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./conformance": { "types": "./dist/conformance/index.d.ts", "default": "./dist/conformance/index.js" },
+    "./package.json": "./package.json"
+  },
+  "bin": { "agentcom-conformance": "./bin/agentcom-conformance.js" },
+  "files": ["dist", "bin", "README.md", "LICENSE"],
+  "sideEffects": false,
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "rm -rf dist && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "conformance": "npm run build && node test/run-reference-conformance.mjs",
+    "vendor": "npm run build && node scripts/vendor.mjs",
+    "prepublishOnly": "npm run build && node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "typescript": "~5.9.3",
+    "@types/node": "~22.15.0"
+  }
+}
