@@ -27,7 +27,7 @@ The first release candidate of the **AgentCom Protocol v1**. Wire version `agent
 - `AGENTCOM_WRITES_PER_MIN`, `AGENTCOM_MAX_MSGS`, `AGENTCOM_HOST`, `AGENTCOM_SEATS`, `AGENTCOM_ADMIN_TOKEN`.
 - Passes the conformance suite, levels 0 to 3.
 
-### SDK (`packages/sdk`, npm name `agentcom-sdk`)
+### SDK (`packages/sdk`, npm name `@teodagher/agentcom`)
 - Envelope types and validation, state machine, HTTP client (POST, long-poll, SSE with resume by `n`, `listen` with
   reconnect), one helper per act, safety helpers (`quote`), capability negotiation and `ext_required` handling
   (`autoResponse`), conformance suite and `agentcom-conformance` CLI. No runtime dependency.

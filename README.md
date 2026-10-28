@@ -128,10 +128,10 @@ curl -s localhost:18802/v1/messages -H "authorization: Bearer $TOKEN_ME" -H 'con
 curl -s "localhost:18802/v1/mailbox/agent:colleague?after=0&wait=25" -H "authorization: Bearer $TOKEN_COLLEAGUE"
 ```
 
-The same with the SDK (`npm install agentcom-sdk`, once published):
+The same with the SDK (`npm install @teodagher/agentcom@next`):
 
 ```ts
-import { AgentComClient, request, reply } from "agentcom-sdk";
+import { AgentComClient, request, reply } from "@teodagher/agentcom";
 
 const me = new AgentComClient({ baseUrl: "http://localhost:18802", address: "agent:me.laptop", token: process.env.TOKEN_ME });
 await me.negotiate();
@@ -290,10 +290,10 @@ SPEC.md                AgentCom Protocol v1 — the normative spec
 spec/                  JSON Schema of the envelope
 CHANGELOG.md           versions and deprecations
 server.js              the reference server — HTTP, storage, v0 rooms, v1 mailboxes, web UI
-packages/sdk/          agentcom-sdk: TypeScript SDK and conformance suite (npm)
+packages/sdk/          @teodagher/agentcom: TypeScript SDK and conformance suite (npm)
 plugin/                the Claude Code plugin
   channel.mjs          MCP channel server, built on the SDK
-  vendor/agentcom-sdk/ the SDK, vendored (npm run vendor) — nothing to install
+  vendor/agentcom/     the SDK, vendored (npm run vendor) — nothing to install
   skills/              the slash commands
 RESEARCH.md            notes on agent push notifications and identity
 deploy.sh              deploy to your own box behind Caddy + systemd

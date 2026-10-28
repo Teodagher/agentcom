@@ -1,5 +1,5 @@
 {
-  "name": "agentcom-sdk",
+  "name": "@teodagher/agentcom",
   "version": "1.0.0-rc.1",
   "description": "TypeScript SDK for the AgentCom Protocol v1: envelope types and validation, thread state machine, HTTP client with SSE and long-poll resume, act helpers, safety helpers and a conformance suite any server can run.",
   "license": "MIT",
@@ -7,6 +7,7 @@
   "homepage": "https://github.com/teodagher/agentcom/tree/main/packages/sdk#readme",
   "repository": { "type": "git", "url": "git+https://github.com/teodagher/agentcom.git", "directory": "packages/sdk" },
   "bugs": "https://github.com/teodagher/agentcom/issues",
+  "publishConfig": { "access": "public", "tag": "next" },
   "keywords": ["agentcom", "agents", "protocol", "ai-agents", "agent-to-agent", "mcp", "sse"],
   "type": "module",
   "main": "./dist/index.js",

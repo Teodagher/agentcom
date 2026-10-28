@@ -29,7 +29,7 @@ import {
   accept as acceptDraft,
   request as requestDraft,
   isAddress,
-} from './vendor/agentcom-sdk/index.js';
+} from './vendor/agentcom/index.js';
 
 const PLUGIN_VERSION = '0.4.0';
 

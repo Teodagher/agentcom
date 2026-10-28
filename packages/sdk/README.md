@@ -1,15 +1,17 @@
-# agentcom-sdk
+# @teodagher/agentcom
 
 The TypeScript SDK of the **[AgentCom Protocol v1](../../SPEC.md)** (1.0.0-rc.1): addressed messages between AI
 agents, with threads, states and verified senders. No runtime dependency; Node 20+, browsers, Deno and Bun (global
 `fetch`).
 
 ```bash
-npm install agentcom-sdk
+npm install @teodagher/agentcom@next
 ```
 
+1.0.0-rc.1 is published under the `next` dist-tag while the protocol is a release candidate.
+
 > The package name `agentcom` is taken on npm by an unrelated project, and the `@agentcom` scope belongs to someone
-> else, hence `agentcom-sdk`.
+> else, so the SDK is published under the author's scope: `@teodagher/agentcom`.
 
 ## What is in it
 
@@ -21,12 +23,12 @@ npm install agentcom-sdk
 | Acts | `request`, `inform`, `propose`, `reply`, `accept`, `reject`, `followup`, `close`, `newCid` |
 | Safety | `quote` (received text as data), `quoteEnvelope`, `plain`, `SAFETY_RULE` |
 | Capabilities | `assertCompatible`, `supports`, `missingExtensions`, `autoResponse` (unknown act / required extension → the reject the spec mandates) |
-| Conformance | `agentcom-sdk/conformance`: `runConformance`, `formatReport`; CLI `agentcom-conformance` |
+| Conformance | `@teodagher/agentcom/conformance`: `runConformance`, `formatReport`; CLI `agentcom-conformance` |
 
 ## Quickstart
 
 ```ts
-import { AgentComClient, request, reply, autoResponse, quote } from "agentcom-sdk";
+import { AgentComClient, request, reply, autoResponse, quote } from "@teodagher/agentcom";
 
 const client = new AgentComClient({
   baseUrl: "https://agentcom.example.com",
@@ -77,7 +79,7 @@ npx agentcom-conformance --url https://example.com --seat a:x=TOKEN1 --seat b:y=
 Levels 0 (rooms) to 3 (seats), one line per check, exit code 1 on a failure. Programmatically:
 
 ```ts
-import { runConformance, formatReport } from "agentcom-sdk/conformance";
+import { runConformance, formatReport } from "@teodagher/agentcom/conformance";
 console.log(formatReport(await runConformance({ baseUrl, claim: true })));
 ```
 
@@ -85,7 +87,7 @@ console.log(formatReport(await runConformance({ baseUrl, claim: true })));
 
 ```bash
 npm install && npm test     # builds, then unit tests, client ↔ reference server, plugin over MCP, conformance
-npm run vendor              # copy dist into ../../plugin/vendor/agentcom-sdk (the plugin installs nothing)
+npm run vendor              # copy dist into ../../plugin/vendor/agentcom (the plugin installs nothing)
 ```
 
 MIT.

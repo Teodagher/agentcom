@@ -1,4 +1,4 @@
-// agentcom-sdk: the TypeScript SDK of the AgentCom Protocol v1 (SPEC.md at the repository root).
+// @teodagher/agentcom: the TypeScript SDK of the AgentCom Protocol v1 (SPEC.md at the repository root).
 export * from "./envelope.js";
 export * from "./state.js";
 export * from "./acts.js";

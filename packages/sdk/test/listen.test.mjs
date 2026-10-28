@@ -56,7 +56,7 @@ test("the plugin's vendored SDK is the package build", async () => {
   const { join, dirname } = await import("node:path");
   const { fileURLToPath } = await import("node:url");
   const here = dirname(fileURLToPath(import.meta.url));
-  const dist = join(here, "../dist"), vendor = join(here, "../../../plugin/vendor/agentcom-sdk");
+  const dist = join(here, "../dist"), vendor = join(here, "../../../plugin/vendor/agentcom");
   const built = readdirSync(dist).filter((f) => f.endsWith(".js")).sort();
   assert.deepEqual(readdirSync(vendor).filter((f) => f.endsWith(".js")).sort(), built);
   for (const f of built) assert.equal(readFileSync(join(vendor, f), "utf8"), readFileSync(join(dist, f), "utf8"), `${f} differs: run npm run vendor`);
