@@ -1,0 +1,8 @@
+{
+  "name": "agentcom-sdk",
+  "version": "1.0.0-rc.1",
+  "type": "module",
+  "main": "index.js",
+  "private": true,
+  "description": "Vendored copy of packages/sdk (npm run vendor). Do not edit."
+}
