@@ -68,6 +68,7 @@ function loadRoom(id) {
   // handed out twice (conformance level 0).
   room = { id, msgs: [], lastN: 0, waiters: new Set(), subs: new Set(), meta: loadMeta(id) };
   try {
+    repairTorn(roomFile(id));
     const raw = fs.readFileSync(roomFile(id), 'utf8');
     for (const line of raw.split('\n')) {
       if (!line.trim()) continue;
@@ -110,6 +111,18 @@ function addMessage(id, from, text, cid) {
   for (const w of pending) w(msg);
   for (const s of [...room.subs]) s(msg);
   return msg;
+}
+
+// A long-poll counts as an open stream for its IP; over the cap it returns at
+// once (the client sees no new message and calls again later).
+async function waitCapped(req, id, after, seconds) {
+  const release = takeStream([[`ip:${clientIp(req)}`, STREAMS_PER_IP]]);
+  if (!release) return false;
+  try {
+    return await waitForMessage(id, after, seconds);
+  } finally {
+    release();
+  }
 }
 
 // Resolves when a message with n > after exists, or after `seconds`.
@@ -290,10 +303,93 @@ function rateLimited(ip) {
   return entry.count > WRITES_PER_MIN;
 }
 
+// x-forwarded-for is trusted only behind a proxy we were told about
+// (AGENTCOM_TRUST_PROXY=1, set by deploy.sh behind Caddy); otherwise anyone
+// could pick their own IP and escape every per-IP limit.
+const TRUST_PROXY = process.env.AGENTCOM_TRUST_PROXY === '1';
 function clientIp(req) {
   const fwd = req.headers['x-forwarded-for'];
-  if (typeof fwd === 'string' && fwd) return fwd.split(',')[0].trim();
+  if (TRUST_PROXY && typeof fwd === 'string' && fwd) return fwd.split(',')[0].trim();
   return req.socket.remoteAddress || 'unknown';
+}
+
+// Expired rate-limit entries are dropped, so the map does not grow forever.
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of rate) if (now > v.resetAt) rate.delete(k);
+  for (const [k, v] of seatClaims) if (now > v.resetAt) seatClaims.delete(k);
+}, 60_000).unref();
+
+// Seat claims: a separate, slower budget per IP.
+const SEATS_PER_HOUR = Number(process.env.AGENTCOM_SEATS_PER_HOUR || 20);
+const seatClaims = new Map();
+function seatClaimLimited(ip) {
+  const now = Date.now();
+  let e = seatClaims.get(ip);
+  if (!e || now > e.resetAt) seatClaims.set(ip, (e = { count: 0, resetAt: now + 3_600_000 }));
+  e.count += 1;
+  return e.count > SEATS_PER_HOUR;
+}
+
+// Long-lived reads (SSE, long-poll with wait) are capped per key (an IP, a
+// seat): each one holds a socket and a timer.
+const STREAMS_PER_IP = Number(process.env.AGENTCOM_MAX_STREAMS_PER_IP || 32);
+const STREAMS_PER_SEAT = Number(process.env.AGENTCOM_MAX_STREAMS_PER_SEAT || 4);
+const streams = new Map();
+// Returns a release function, or null when one of the keys is at its cap.
+function takeStream(keys) {
+  for (const [k, max] of keys) if ((streams.get(k) || 0) >= max) return null;
+  for (const [k] of keys) streams.set(k, (streams.get(k) || 0) + 1);
+  let done = false;
+  return () => {
+    if (done) return;
+    done = true;
+    for (const [k] of keys) {
+      const n = (streams.get(k) || 1) - 1;
+      if (n > 0) streams.set(k, n);
+      else streams.delete(k);
+    }
+  };
+}
+
+// A crash or a full disk can leave half a line at the end of a JSONL file. The
+// next append would glue a good record onto it and both would be lost on the
+// following start (a seat could vanish and be claimed by someone else). So a
+// file that does not end with a newline is cut back to its last newline before
+// anything is written to it.
+function repairTorn(file) {
+  let fd;
+  try {
+    fd = fs.openSync(file, 'r+');
+  } catch {
+    return; // no file yet
+  }
+  try {
+    const size = fs.fstatSync(fd).size;
+    if (!size) return;
+    const last = Buffer.alloc(1);
+    fs.readSync(fd, last, 0, 1, size - 1);
+    if (last[0] === 0x0a) return;
+    // walk back to the previous newline
+    const chunk = Buffer.alloc(Math.min(size, 1 << 20));
+    let end = size;
+    while (end > 0) {
+      const start = Math.max(0, end - chunk.length);
+      const len = end - start;
+      fs.readSync(fd, chunk, 0, len, start);
+      const i = chunk.subarray(0, len).lastIndexOf(0x0a);
+      if (i !== -1) {
+        fs.ftruncateSync(fd, start + i + 1);
+        console.error(`agentcom: cut a torn last line in ${file}`);
+        return;
+      }
+      end = start;
+    }
+    fs.ftruncateSync(fd, 0);
+    console.error(`agentcom: ${file} held only a torn line; emptied`);
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 function send(res, status, type, body) {
@@ -1107,7 +1203,7 @@ async function handleSay(req, res, id, params, isPost) {
     const msg = addMessage(id, from, text, cid);
     after = msg.n;
   }
-  if (wait) await waitForMessage(id, after, wait);
+  if (wait) await waitCapped(req, id, after, wait);
 
   const fresh = loadRoom(id);
   const newOnes = fresh.msgs.filter((m) => m.n > after);
@@ -1168,6 +1264,13 @@ const V1_UUID = /^[0-9a-f-]{36}$/i;
 // (POST /v1/seats needs AGENTCOM_ADMIN_TOKEN as a Bearer token).
 const V1_SEATS = process.env.AGENTCOM_SEATS === 'closed' ? 'closed' : 'open';
 const V1_ADMIN = process.env.AGENTCOM_ADMIN_TOKEN || '';
+// Address spaces nobody may claim by open registration: on a public server,
+// "nodal:" or "claude-code:" would look like an Ooper Relay agent to a reader
+// who forgets that an address only means something on the server that issued it.
+const V1_RESERVED = (process.env.AGENTCOM_RESERVED_SPACES ?? 'nodal,claude-code').split(',').map((x) => x.trim()).filter(Boolean);
+// Messages older than this are dropped from memory and from the log (threads,
+// seats and mailbox ranks stay).
+const V1_RETENTION_MS = Number(process.env.AGENTCOM_V1_RETENTION_DAYS || 30) * 86_400_000;
 
 fs.mkdirSync(V1_DIR, { recursive: true });
 
@@ -1178,6 +1281,8 @@ const v1 = {
   byCid: new Map(), // `${from}\n${cid}` -> id
   threads: new Map(), // id -> thread
   boxes: new Map(), // address -> { last_n, acked_n, ids: [] }
+  byThread: new Map(), // thread id -> [message ids]
+  openPair: new Map(), // `${a}\n${b}\n${subject}` (a < b) -> id of the open thread
   waiters: new Map(), // address -> Set(cb) (long-poll)
   subs: new Map(), // address -> Set(cb) (SSE)
 };
@@ -1191,21 +1296,43 @@ function v1Box(address) {
   return b;
 }
 
+const v1PairKey = (a, b, subject) => (a < b ? `${a}\n${b}\n${subject}` : `${b}\n${a}\n${subject}`);
+
+function v1SetThread(t) {
+  v1.threads.set(t.id, t);
+  if (!t.subject) return;
+  const k = v1PairKey(t.requester, t.recipient, t.subject);
+  if (V1_OPEN_STATES.includes(t.state)) v1.openPair.set(k, t.id);
+  else if (v1.openPair.get(k) === t.id) v1.openPair.delete(k);
+}
+
+function v1AddMessage(m) {
+  v1.messages.set(m.id, m);
+  v1.byCid.set(`${m.from}\n${m.cid}`, m.id);
+  const box = v1Box(m.to);
+  box.ids.push(m.id);
+  if (m.n > box.last_n) box.last_n = m.n;
+  let t = v1.byThread.get(m.thread);
+  if (!t) v1.byThread.set(m.thread, (t = []));
+  t.push(m.id);
+}
+
 function v1Apply(rec) {
-  if (rec.type === 'seat') {
+  if (rec.type === 'box') {
+    const box = v1Box(rec.address);
+    if (rec.last_n > box.last_n) box.last_n = rec.last_n;
+    if (rec.acked_n > box.acked_n) box.acked_n = rec.acked_n;
+  } else if (rec.type === 'msg') {
+    v1AddMessage(rec.message);
+  } else if (rec.type === 'seat') {
     v1.seats.set(rec.address, { hash: rec.hash, claimed: rec.at });
     v1.byHash.set(rec.hash, rec.address);
     v1Box(rec.address);
   } else if (rec.type === 'send') {
-    const m = rec.message;
-    v1.messages.set(m.id, m);
-    v1.byCid.set(`${m.from}\n${m.cid}`, m.id);
-    const box = v1Box(m.to);
-    box.ids.push(m.id);
-    if (m.n > box.last_n) box.last_n = m.n;
-    v1.threads.set(rec.thread.id, rec.thread);
+    v1AddMessage(rec.message);
+    v1SetThread(rec.thread);
   } else if (rec.type === 'thread') {
-    v1.threads.set(rec.thread.id, rec.thread);
+    v1SetThread(rec.thread);
   } else if (rec.type === 'ack') {
     const box = v1Box(rec.address);
     if (rec.n > box.acked_n) box.acked_n = rec.n;
@@ -1219,7 +1346,42 @@ function v1Write(rec) {
   v1Apply(rec);
 }
 
+// Drops messages past the retention from memory. Ranks, acks, threads and
+// seats stay, so a cursor never moves backwards and n is never reissued.
+function v1Prune(now = Date.now()) {
+  const limit = new Date(now - V1_RETENTION_MS).toISOString();
+  let dropped = 0;
+  for (const [id, m] of v1.messages) {
+    if (m.at >= limit) continue;
+    v1.messages.delete(id);
+    if (v1.byCid.get(`${m.from}\n${m.cid}`) === id) v1.byCid.delete(`${m.from}\n${m.cid}`);
+    dropped++;
+  }
+  if (!dropped) return 0;
+  for (const box of v1.boxes.values()) box.ids = box.ids.filter((id) => v1.messages.has(id));
+  for (const [t, ids] of v1.byThread) {
+    const kept = ids.filter((id) => v1.messages.has(id));
+    if (kept.length) v1.byThread.set(t, kept);
+    else v1.byThread.delete(t);
+  }
+  return dropped;
+}
+
+// Rewrites the log from the state: what was pruned leaves the disk too. Written
+// to a temporary file, then renamed over the log (atomic on POSIX).
+function v1Compact() {
+  const lines = [];
+  for (const [address, seat] of v1.seats) lines.push({ type: 'seat', address, hash: seat.hash, at: seat.claimed });
+  for (const [address, b] of v1.boxes) lines.push({ type: 'box', address, last_n: b.last_n, acked_n: b.acked_n });
+  for (const m of [...v1.messages.values()].sort((a, b) => a.at.localeCompare(b.at))) lines.push({ type: 'msg', message: m });
+  for (const t of v1.threads.values()) lines.push({ type: 'thread', thread: t });
+  const tmp = `${V1_LOG}.tmp`;
+  fs.writeFileSync(tmp, lines.map((l) => JSON.stringify(l)).join('\n') + (lines.length ? '\n' : ''));
+  fs.renameSync(tmp, V1_LOG);
+}
+
 (function v1Load() {
+  repairTorn(V1_LOG);
   let raw = '';
   try {
     raw = fs.readFileSync(V1_LOG, 'utf8');
@@ -1231,10 +1393,15 @@ function v1Write(rec) {
     try {
       v1Apply(JSON.parse(line));
     } catch {
-      /* a torn last line after a crash: that write never happened */
+      /* unreadable line: skipped (repairTorn already cut a torn tail) */
     }
   }
+  if (v1Prune()) v1Compact();
 })();
+
+setInterval(() => {
+  if (v1Prune()) v1Compact();
+}, 3_600_000).unref();
 
 class V1Error extends Error {
   constructor(status, code, message, extra) {
@@ -1275,6 +1442,7 @@ function v1Discovery() {
     extensions: [],
     seat_modes: ['seat-token'],
     seat_registration: V1_SEATS,
+    reserved_spaces: V1_SEATS === 'open' ? V1_RESERVED : [],
     limits: { text: V1_TEXT_MAX, title: V1_TITLE_MAX, ext: V1_EXT_MAX, wait: MAX_WAIT },
     endpoints: {
       seats: '/v1/seats',
@@ -1403,11 +1571,9 @@ function v1Send(from, x) {
   let thread;
   if (opening) {
     if (x.subject) {
-      for (const t of v1.threads.values()) {
-        const pair = (t.requester === from && t.recipient === x.to) || (t.requester === x.to && t.recipient === from);
-        if (pair && t.subject === x.subject && V1_OPEN_STATES.includes(t.state)) {
-          throw new V1Error(409, 'conflict', `An open thread already exists between these two addresses for this subject: ${t.id}. Write in it.`, { thread: t.id });
-        }
+      const open = v1.threads.get(v1.openPair.get(v1PairKey(from, x.to, x.subject)));
+      if (open && V1_OPEN_STATES.includes(open.state)) {
+        throw new V1Error(409, 'conflict', `An open thread already exists between these two addresses for this subject: ${open.id}. Write in it.`, { thread: open.id });
       }
     }
     thread = {
@@ -1423,6 +1589,14 @@ function v1Send(from, x) {
     if (!other) throw new V1Error(403, 'forbidden', 'This seat is not one of the two ends of the thread.');
     if (x.to !== other) throw new V1Error(403, 'forbidden', `In a thread, one writes to the other end only (${other}).`);
     thread = { ...t, updated_at: now, last_activity_at: now };
+    // Only the recipient answers: a requester's reply to its own request would mark it answered.
+    if ((x.act === 'reply' || x.act === 'accept' || x.act === 'reject') && t.recipient !== from) {
+      throw new V1Error(403, 'forbidden', `Only the recipient of the thread may send a "${x.act}".`);
+    }
+    if (x.in_reply_to) {
+      const target = v1.messages.get(x.in_reply_to);
+      if (!target || target.thread !== t.id) throw new V1Error(400, 'invalid_envelope', 'in_reply_to is not a message of this thread.');
+    }
     if (x.act === 'followup') {
       if (t.requester !== from) throw new V1Error(403, 'forbidden', 'Only the requester follows up.');
       if (!V1_OPEN_STATES.includes(t.state) || !V1_FOLLOWABLE.includes(t.kind)) {
@@ -1500,10 +1674,14 @@ async function handleV1(req, res, url, pathname) {
         const ok = t && V1_ADMIN && t[1].trim().length === V1_ADMIN.length && crypto.timingSafeEqual(Buffer.from(t[1].trim()), Buffer.from(V1_ADMIN));
         if (!ok) throw new V1Error(401, 'unauthenticated', 'Seat registration is closed on this server: the administrator token is required.');
       }
-      if (rateLimited(clientIp(req))) throw new V1Error(429, 'rate_limited', 'Too many writes: wait a minute.');
+      if (seatClaimLimited(clientIp(req))) throw new V1Error(429, 'rate_limited', 'Too many seat claims from this address: wait an hour.');
       const body = await v1Body(req);
       const address = String(body.address || '');
-      if (!V1_ADDRESS.test(address)) throw new V1Error(400, 'invalid_envelope', 'address: "<space>:<id>", e.g. "claude-code:teo.laptop".');
+      if (!V1_ADDRESS.test(address)) throw new V1Error(400, 'invalid_envelope', 'address: "<space>:<id>", e.g. "agent:teo.laptop".');
+      const space = address.slice(0, address.indexOf(':'));
+      if (V1_SEATS === 'open' && V1_RESERVED.includes(space)) {
+        throw new V1Error(403, 'forbidden', `The "${space}:" space is reserved on this server; open registration cannot claim it. Pick another space.`);
+      }
       if (v1.seats.has(address)) throw new V1Error(409, 'seat_taken', `The seat ${address} is already claimed.`);
       const token = `as_${crypto.randomBytes(24).toString('base64url')}`;
       v1Write({ type: 'seat', address, hash: hashKey(token), at: new Date().toISOString() });
@@ -1521,7 +1699,7 @@ async function handleV1(req, res, url, pathname) {
 
     const box = pathname.match(/^\/v1\/mailbox\/([^/]+)(\/events|\/ack)?$/);
     if (box) {
-      const address = decodeURIComponent(box[1]);
+      const address = box[1]; // the path is already decoded once
       const seat = v1Seat(req);
       if (seat !== address) throw new V1Error(403, 'forbidden', 'A seat reads and acknowledges its own mailbox only.');
       const after = Math.max(0, Number(url.searchParams.get('after') || req.headers['last-event-id'] || 0) || 0);
@@ -1536,6 +1714,8 @@ async function handleV1(req, res, url, pathname) {
         return v1Json(res, 200, { acked_n: v1Box(address).acked_n, last_n: b.last_n });
       }
       if (box[2] === '/events') {
+        const release = takeStream([[`ip:${clientIp(req)}`, STREAMS_PER_IP], [`seat:${address}`, STREAMS_PER_SEAT]]);
+        if (!release) throw new V1Error(429, 'rate_limited', `Too many open streams for this seat or address (${STREAMS_PER_SEAT} per seat, ${STREAMS_PER_IP} per IP). Close one.`);
         res.writeHead(200, {
           'content-type': 'text/event-stream',
           'cache-control': 'no-cache',
@@ -1559,13 +1739,22 @@ async function handleV1(req, res, url, pathname) {
         req.on('close', () => {
           clearInterval(ping);
           set.delete(emit);
+          release();
         });
         return;
       }
       if (req.method !== 'GET') throw new V1Error(405, 'invalid_envelope', 'GET to read the mailbox.');
       const wait = Math.min(MAX_WAIT, Math.max(0, Number(url.searchParams.get('wait')) || 0));
       const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit')) || 100));
-      await v1WaitFor(address, after, wait);
+      if (wait) {
+        const release = takeStream([[`ip:${clientIp(req)}`, STREAMS_PER_IP], [`seat:${address}`, STREAMS_PER_SEAT]]);
+        if (!release) throw new V1Error(429, 'rate_limited', `Too many open reads for this seat or address (${STREAMS_PER_SEAT} per seat, ${STREAMS_PER_IP} per IP).`);
+        try {
+          await v1WaitFor(address, after, wait);
+        } finally {
+          release();
+        }
+      }
       const b = v1Box(address);
       return v1Json(res, 200, { address, messages: v1Inbox(address, after, limit), last_n: b.last_n, acked_n: b.acked_n });
     }
@@ -1573,7 +1762,7 @@ async function handleV1(req, res, url, pathname) {
     const th = pathname.match(/^\/v1\/threads\/([^/]+)(\/awaiting-human)?$/);
     if (th) {
       const seat = v1Seat(req);
-      const t = v1ThreadFor(decodeURIComponent(th[1]), seat);
+      const t = v1ThreadFor(th[1], seat);
       if (th[2]) {
         if (req.method !== 'POST') throw new V1Error(405, 'invalid_envelope', 'POST to hand the thread over to your human.');
         if (t.recipient !== seat) throw new V1Error(403, 'forbidden', 'Only the recipient hands the thread over to its human.');
@@ -1584,7 +1773,7 @@ async function handleV1(req, res, url, pathname) {
         v1Write({ type: 'thread', thread: next });
         return v1Json(res, 200, { thread: next });
       }
-      const messages = [...v1.messages.values()].filter((m) => m.thread === t.id).sort((a, b) => a.at.localeCompare(b.at) || a.n - b.n);
+      const messages = (v1.byThread.get(t.id) || []).map((id) => v1.messages.get(id)).filter(Boolean).sort((a, b) => a.at.localeCompare(b.at) || a.n - b.n);
       return v1Json(res, 200, { thread: t, messages });
     }
     throw new V1Error(404, 'not_found', 'No such endpoint. See GET /.well-known/agentcom.');
@@ -1593,14 +1782,35 @@ async function handleV1(req, res, url, pathname) {
   }
 }
 
-const server = http.createServer(async (req, res) => {
+// One bad request must never take the server down: a rejected handler is
+// answered with a 500 and logged, and any stray rejection is logged.
+process.on('unhandledRejection', (e) => console.error('agentcom: unhandled rejection:', e));
+
+const server = http.createServer((req, res) => {
+  handle(req, res).catch((e) => {
+    console.error('agentcom: request failed:', e);
+    try {
+      if (!res.headersSent) send(res, 500, 'text/plain; charset=utf-8', 'The server failed on this request.\n');
+      else res.end();
+    } catch {
+      /* the socket is gone */
+    }
+  });
+});
+
+async function handle(req, res) {
   let url;
   try {
     url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   } catch {
     return send(res, 400, 'text/plain; charset=utf-8', 'Bad request\n');
   }
-  const pathname = decodeURIComponent(url.pathname);
+  let pathname;
+  try {
+    pathname = decodeURIComponent(url.pathname);
+  } catch {
+    return send(res, 400, 'text/plain; charset=utf-8', 'Bad request: malformed percent-encoding in the path.\n');
+  }
 
   if (req.method === 'OPTIONS') return send(res, 204, 'text/plain', '');
 
@@ -1766,6 +1976,8 @@ const server = http.createServer(async (req, res) => {
     if (!validRoomId(id)) return send(res, 400, 'text/plain; charset=utf-8', 'Bad room name\n');
     const denied = roomDenied(loadRoom(id), req, url, null);
     if (denied) return send(res, 403, 'text/plain; charset=utf-8', `${denied}\n`);
+    const release = takeStream([[`ip:${clientIp(req)}`, STREAMS_PER_IP]]);
+    if (!release) return send(res, 429, 'text/plain; charset=utf-8', `Too many open streams from this address (${STREAMS_PER_IP}). Close one.\n`);
     res.writeHead(200, {
       'content-type': 'text/event-stream',
       'cache-control': 'no-cache',
@@ -1784,6 +1996,7 @@ const server = http.createServer(async (req, res) => {
     req.on('close', () => {
       clearInterval(ping);
       room.subs.delete(cb);
+      release();
     });
     return;
   }
@@ -1829,7 +2042,7 @@ const server = http.createServer(async (req, res) => {
 
     const after = Number(url.searchParams.get('after')) || 0;
     const wait = Math.min(MAX_WAIT, Math.max(0, Number(url.searchParams.get('wait')) || 0));
-    if (wait) await waitForMessage(id, after, wait);
+    if (wait) await waitCapped(req, id, after, wait);
 
     const room = loadRoom(id);
     if (ext === '.json' || url.searchParams.get('format') === 'json') {
@@ -1853,7 +2066,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   return send(res, 404, 'text/plain; charset=utf-8', `Not found. Try ${PUBLIC_ORIGIN}/new\n`);
-});
+}
 
 server.requestTimeout = 0;
 server.headersTimeout = 65_000;
