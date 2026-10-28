@@ -19,9 +19,10 @@ const MAX_TEXT = 32000;
 const MAX_BODY = 262144; // 256 KB — comfortably above MAX_TEXT plus JSON overhead
 const MAX_NAME = 60;
 const MAX_CID = 64;
-const MAX_MSGS = 5000;
+const MAX_MSGS = Number(process.env.AGENTCOM_MAX_MSGS || 5000); // kept in memory per room; the file keeps everything
 const MAX_WAIT = 25; // seconds — stays under the Vercel proxy timeout in front of us
-const WRITES_PER_MIN = 60;
+const WRITES_PER_MIN = Number(process.env.AGENTCOM_WRITES_PER_MIN || 60);
+const HOST = process.env.AGENTCOM_HOST || '127.0.0.1';
 
 fs.mkdirSync(ROOMS_DIR, { recursive: true });
 fs.mkdirSync(ORGS_DIR, { recursive: true });
@@ -62,13 +63,18 @@ function loadRoom(id) {
   let room = rooms.get(id);
   if (room) return room;
   // waiters: one-shot long-poll resolvers. subs: persistent SSE listeners.
-  room = { id, msgs: [], waiters: new Set(), subs: new Set(), meta: loadMeta(id) };
+  // lastN: the highest rank ever given in this room. Ranks come from it, never from
+  // the array length — the in-memory array is trimmed, and a rank must never be
+  // handed out twice (conformance level 0).
+  room = { id, msgs: [], lastN: 0, waiters: new Set(), subs: new Set(), meta: loadMeta(id) };
   try {
     const raw = fs.readFileSync(roomFile(id), 'utf8');
     for (const line of raw.split('\n')) {
       if (!line.trim()) continue;
       try {
-        room.msgs.push(JSON.parse(line));
+        const m = JSON.parse(line);
+        room.msgs.push(m);
+        if (Number(m.n) > room.lastN) room.lastN = Number(m.n);
       } catch {
         /* skip a torn line rather than lose the room */
       }
@@ -76,6 +82,7 @@ function loadRoom(id) {
   } catch {
     /* new room */
   }
+  if (room.msgs.length > MAX_MSGS) room.msgs.splice(0, room.msgs.length - MAX_MSGS);
   rooms.set(id, room);
   return room;
 }
@@ -85,15 +92,18 @@ function loadRoom(id) {
 // answers itself into an infinite loop.
 function addMessage(id, from, text, cid) {
   const room = loadRoom(id);
+  room.lastN += 1;
   const msg = {
-    n: room.msgs.length + 1,
+    n: room.lastN,
     from,
     text,
     at: new Date().toISOString(),
   };
   if (cid) msg.cid = cid;
   room.msgs.push(msg);
-  fs.appendFile(roomFile(id), JSON.stringify(msg) + '\n', () => {});
+  // Synchronous: a rank handed to a client is on disk before it is answered, so a
+  // restart never hands the same rank out again.
+  fs.appendFileSync(roomFile(id), JSON.stringify(msg) + '\n');
   if (room.msgs.length > MAX_MSGS) room.msgs.splice(0, room.msgs.length - MAX_MSGS);
   const pending = [...room.waiters];
   room.waiters.clear();
@@ -1369,6 +1379,6 @@ const server = http.createServer(async (req, res) => {
 server.requestTimeout = 0;
 server.headersTimeout = 65_000;
 server.keepAliveTimeout = 120_000;
-server.listen(PORT, '127.0.0.1', () => {
-  console.log(`agentcom listening on 127.0.0.1:${PORT} (public: ${PUBLIC_ORIGIN})`);
+server.listen(PORT, HOST, () => {
+  console.log(`agentcom listening on ${HOST}:${PORT} (public: ${PUBLIC_ORIGIN})`);
 });
