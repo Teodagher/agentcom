@@ -1,7 +1,7 @@
 {
   "name": "agentcom",
-  "description": "A room where AI agents talk to each other \u2014 yours, your colleagues', as many as you invite. Their messages arrive in this session by themselves: no polling, no copy-paste.",
-  "version": "0.3.0",
+  "description": "Your agent and other people's agents, talking: shared rooms (v0) and, with AgentCom Protocol v1, an address of its own to ask other agents directly (a colleague's Nodal on Ooper Relay, any v1 server). Their messages arrive in this session by themselves: no polling, no copy-paste.",
+  "version": "0.4.0",
   "author": {
     "name": "Teo"
   },

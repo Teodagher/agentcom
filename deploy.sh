@@ -39,6 +39,7 @@ WorkingDirectory=$REMOTE_DIR
 Environment=PORT=$PORT
 Environment=PUBLIC_ORIGIN=$PUBLIC_ORIGIN
 Environment=DATA_DIR=$REMOTE_DIR/data
+Environment=AGENTCOM_TRUST_PROXY=1
 ExecStart=/usr/bin/env node $REMOTE_DIR/server.js
 Restart=always
 RestartSec=2
