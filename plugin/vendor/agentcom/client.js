@@ -59,6 +59,7 @@ export class AgentComClient {
             this.address = r.address;
         return {
             address: typeof r.address === "string" ? r.address : null,
+            domain: typeof r.domain === "string" && r.domain ? r.domain : null,
             messages: (r.messages ?? []).filter((m) => validateEnvelope(m).length === 0).map((m) => normalizeEnvelope(m)),
             last_n: typeof r.last_n === "number" ? r.last_n : null,
             acked_n: typeof r.acked_n === "number" ? r.acked_n : null,
@@ -72,6 +73,31 @@ export class AgentComClient {
     async thread(id) {
         const r = await this.call("GET", this.path("thread", id));
         return { thread: r.thread, messages: (r.messages ?? []).map((m) => normalizeEnvelope(m)) };
+    }
+    /**
+     * Who this seat may talk to (capability `directory`): `{address, name, description, status}` entries, filtered by `q`
+     * (case-insensitive, on address, name and description). The server decides what each seat may see.
+     */
+    async directory(o = {}) {
+        const q = new URLSearchParams();
+        if (o.q)
+            q.set("q", o.q);
+        if (o.limit)
+            q.set("limit", String(o.limit));
+        const qs = q.toString();
+        const r = await this.call("GET", `${this.path("directory")}${qs ? `?${qs}` : ""}`, undefined, { signal: o.signal });
+        return (r.entries ?? []).filter((e) => e && typeof e.address === "string");
+    }
+    /** This seat as the server knows it: address, trust domain, name and description (capability `directory`). */
+    async me() {
+        const r = await this.call("GET", this.path("seat"));
+        if (!this.address && typeof r.address === "string")
+            this.address = r.address;
+        return r;
+    }
+    /** Names this seat in the directory (name, description; null clears). The address and the domain never change. */
+    async updateMe(p) {
+        return this.call("POST", this.path("seat"), p);
     }
     /** The recipient tells the requester it is asking its human (sent → awaiting_human). */
     async awaitHuman(thread) {
@@ -226,4 +252,28 @@ export class AgentComClient {
     async call(method, path, body, o = {}) {
         return (await this.callFull(method, path, body, o)).body;
     }
+}
+async function register(baseUrl, path, body, o) {
+    const f = o.fetch ?? globalThis.fetch.bind(globalThis);
+    const headers = { "content-type": "application/json", accept: "application/json", "agentcom-version": SPEC_VERSION, ...(o.headers ?? {}) };
+    if (o.adminToken)
+        headers.authorization = `Bearer ${o.adminToken}`;
+    const res = await f(`${baseUrl.replace(/\/+$/, "")}${path}`, { method: "POST", headers, body: JSON.stringify(body) });
+    const text = await res.text();
+    let j = {};
+    try {
+        j = JSON.parse(text);
+    }
+    catch { /* plain text */ }
+    if (!res.ok)
+        throw new AgentComError(String(j.error ?? `http_${res.status}`), String(j.message ?? text), res.status, j);
+    return j;
+}
+/** Claims a seat (`POST /v1/seats`). The token is returned once. `domain` + `domain_key` put the seat in a trust domain. */
+export function claimSeat(baseUrl, seat, o = {}) {
+    return register(baseUrl, o.path ?? "/v1/seats", seat, o);
+}
+/** Creates a trust domain (`POST /v1/domains`). Its key, returned once, is what lets a seat join it. */
+export function createDomain(baseUrl, domain, o = {}) {
+    return register(baseUrl, o.path ?? "/v1/domains", { domain }, o);
 }

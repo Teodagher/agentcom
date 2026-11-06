@@ -11,6 +11,12 @@ export type Endpoints = {
   ack: string;
   thread: string;
   awaiting_human: string;
+  /** Create a trust domain (reference server; 1.0.0-rc.2). */
+  domains: string;
+  /** The caller's own seat: GET it, POST {name, description} (capability `directory`). */
+  seat: string;
+  /** Who the caller may talk to: GET ?q= (capability `directory`). */
+  directory: string;
 };
 
 export const DEFAULT_ENDPOINTS: Endpoints = {
@@ -20,6 +26,9 @@ export const DEFAULT_ENDPOINTS: Endpoints = {
   ack: "/v1/mailbox/{address}/ack",
   thread: "/v1/threads/{thread}",
   awaiting_human: "/v1/threads/{thread}/awaiting-human",
+  domains: "/v1/domains",
+  seat: "/v1/seats/me",
+  directory: "/v1/directory",
 };
 
 export const SEAT_MODES = ["host", "seat-token", "oidc", "none"] as const;
@@ -30,7 +39,7 @@ export type Discovery = {
   protocol: "agentcom";
   /** Wire versions accepted in `v`, e.g. ["agentcom/1-draft"]. */
   versions: string[];
-  /** Semver of the spec the server implements, e.g. "1.0.0-rc.1". */
+  /** Semver of the spec the server implements, e.g. "1.0.0-rc.2". */
   version: string;
   /** Conformance levels claimed, cumulative (0 to 3). */
   conformance: number[];
@@ -39,7 +48,7 @@ export type Discovery = {
   /** Extension namespaces the server itself understands. */
   extensions: string[];
   seat_modes: SeatMode[] | string[];
-  limits?: { text?: number; ext?: number; wait?: number; title?: number };
+  limits?: { text?: number; ext?: number; wait?: number; title?: number; chain_depth?: number; team_thread_per_day?: number; team_domain_per_day?: number };
   endpoints?: Partial<Endpoints>;
   deprecated?: string[];
   [k: string]: unknown;

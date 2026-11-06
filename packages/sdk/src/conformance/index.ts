@@ -2,9 +2,14 @@
 //   0 rooms      v0 messages, cursor n without duplicates, long-poll, SSE with resume, text served
 //   1 addressed  to, act, thread, in_reply_to, cid idempotency, mailbox and ack, negotiation
 //   2 states     the transition table, awaiting_human, followups, reasoned rejects
-//   3 seats      from stamped by the server, authentication, one open thread per pair and subject
+//   3 seats      from stamped by the server, one token per address, authentication, one open thread per pair and subject
+// Optional capabilities (1.0.0-rc.2), checked when the server lists them:
+//   directory    GET /v1/directory and the caller's own seat (GET/POST /v1/seats/me)
+//   team         from_domain stamped from the seat, team threads, the chain (root, depth, parent), chain_too_deep
 // It needs seats (address + token): pass them, or let it claim fresh ones on a server that offers POST /v1/seats.
-import { AgentComClient } from "../client.js";
+// The team checks need two more seats in one trust domain (teamSeats), which A, B and C must not belong to.
+import { AgentComClient, claimSeat, createDomain } from "../client.js";
+import { chainOf } from "../team.js";
 import { AgentComError, TEXT_MAX, isSupportedVersion, type Envelope } from "../envelope.js";
 import { major, type Discovery } from "../capabilities.js";
 import * as act from "../acts.js";
@@ -15,8 +20,12 @@ export type ConformanceOptions = {
   baseUrl: string;
   /** At least three seats (A, B, C). */
   seats?: Seat[];
-  /** Claim three fresh seats with POST /v1/seats (reference server). */
+  /** Two seats of one trust domain (team capability). A, B and C must be outside that domain. */
+  teamSeats?: Seat[];
+  /** Claim three fresh seats with POST /v1/seats, and a domain with two seats (POST /v1/domains) for the team checks. */
   claim?: boolean;
+  /** Optional capabilities to check (default: those of "team" and "directory" the server lists). */
+  capabilities?: string[];
   /** A v0 room URL for level 0 (otherwise one is created with GET /new.json when the server lists "rooms_v0"). */
   room?: string;
   /** Levels to run (default: the ones the server claims in its discovery document). */
@@ -27,8 +36,16 @@ export type ConformanceOptions = {
   /** Called after each check (progress). */
   onResult?: (r: CheckResult) => void;
 };
-export type CheckResult = { level: number; name: string; ok: boolean; skipped?: boolean; error?: string; ms: number };
-export type ConformanceReport = { server: string; version: string | null; claimed: number[]; results: CheckResult[]; passed: number[]; failed: number[]; ok: boolean };
+/** `capability`: set on the checks of an optional capability (they do not count towards a level). */
+export type CheckResult = { level: number; capability?: string; name: string; ok: boolean; skipped?: boolean; error?: string; ms: number };
+export type ConformanceReport = {
+  server: string; version: string | null; claimed: number[]; results: CheckResult[]; passed: number[]; failed: number[];
+  /** Optional capabilities checked, passed, failed, and skipped (every check skipped: nothing was proven). */
+  capabilities: { checked: string[]; passed: string[]; failed: string[]; skipped: string[] };
+  ok: boolean;
+};
+/** The optional capabilities this suite knows how to check. */
+export const CHECKED_CAPABILITIES = ["directory", "team"] as const;
 
 class Skip extends Error {}
 const skip = (why: string): never => { throw new Skip(why); };
@@ -57,6 +74,8 @@ export async function runConformance(o: ConformanceOptions): Promise<Conformance
   try { d = await probe.negotiate(); } catch { d = null; }
   const claimed = d?.conformance ?? [];
   const levels = o.levels ?? (claimed.length ? claimed : [0]);
+  const caps = (o.capabilities ?? (d?.capabilities ?? []).filter((c) => (CHECKED_CAPABILITIES as readonly string[]).includes(c)))
+    .filter((c) => (CHECKED_CAPABILITIES as readonly string[]).includes(c));
 
   /* Seats. */
   let seats = o.seats ?? [];
@@ -66,6 +85,14 @@ export async function runConformance(o: ConformanceOptions): Promise<Conformance
       const r = await f(`${baseUrl}/v1/seats`, { method: "POST", headers: { "content-type": "application/json", ...(o.headers ?? {}) }, body: JSON.stringify({ address: `conformance:${tag}-${s}` }) });
       if (!r.ok) throw new Error(`could not claim a seat (${r.status}): ${await r.text()}`);
       seats.push(await r.json() as Seat);
+    }
+  }
+  let teamSeats = o.teamSeats ?? [];
+  if (!teamSeats.length && o.claim && caps.includes("team")) {
+    const tag = rand();
+    const dom = await createDomain(baseUrl, `conformance-${tag}`, { fetch: f, headers: o.headers, path: d?.endpoints?.domains as string | undefined });
+    for (const s of ["t1", "t2"]) {
+      teamSeats.push(await claimSeat(baseUrl, { address: `conformance:${tag}-${s}`, domain: dom.domain, domain_key: dom.key }, { fetch: f, headers: o.headers }));
     }
   }
   const client = (s: Seat | undefined) => {
@@ -90,14 +117,15 @@ export async function runConformance(o: ConformanceOptions): Promise<Conformance
     assert(r.status === status && r.error === code, `expected ${status} ${code}, got ${r.status} ${r.error}`);
   };
 
-  const check = async (level: number, name: string, fn: () => Promise<void>) => {
-    if (!levels.includes(level)) return;
+  const check = async (level: number, name: string, fn: () => Promise<void>, capability?: string) => {
+    if (capability ? !caps.includes(capability) : !levels.includes(level)) return;
     const t = Date.now();
     let r: CheckResult;
-    try { await fn(); r = { level, name, ok: true, ms: Date.now() - t }; }
+    const tagged = capability ? { level, capability } : { level };
+    try { await fn(); r = { ...tagged, name, ok: true, ms: Date.now() - t }; }
     catch (e) {
-      r = e instanceof Skip ? { level, name, ok: true, skipped: true, error: e.message, ms: Date.now() - t }
-        : { level, name, ok: false, error: e instanceof Error ? e.message : String(e), ms: Date.now() - t };
+      r = e instanceof Skip ? { ...tagged, name, ok: true, skipped: true, error: e.message, ms: Date.now() - t }
+        : { ...tagged, name, ok: false, error: e instanceof Error ? e.message : String(e), ms: Date.now() - t };
     }
     results.push(r);
     o.onResult?.(r);
@@ -348,6 +376,15 @@ export async function runConformance(o: ConformanceOptions): Promise<Conformance
     await refused(spy.inbox({ after: 0 }), "forbidden", 403);
     await refused(spy.ack(1), "forbidden", 403);
   });
+  await check(3, "one token per address: each seat's token speaks for its own address only", async () => {
+    const seen = new Set<string>();
+    for (const i of [0, 1, 2]) {
+      const m = (await client(seats[i]).send(act.inform(addr((i + 1) % 3), `who am I (${i})`))).message;
+      assert(m.from === addr(i), `the token of ${addr(i)} sent as ${m.from}`);
+      seen.add(m.from);
+    }
+    assert(seen.size === 3, "two tokens spoke under the same address");
+  });
   await check(3, "one open thread per pair of addresses and subject → 409 conflict", async () => {
     const subject = `test:${rand()}`;
     await A().send(act.request(addr(1), "first on this subject", { subject }));
@@ -355,20 +392,147 @@ export async function runConformance(o: ConformanceOptions): Promise<Conformance
     await refused(B().send(act.request(addr(0), "reverse direction, same subject", { subject })), "conflict", 409);
   });
 
-  const lv = [...new Set(results.map((r) => r.level))].sort();
-  const failed = lv.filter((l) => results.some((r) => r.level === l && !r.ok));
-  return { server: baseUrl, version: d?.version ?? null, claimed, results, passed: lv.filter((l) => !failed.includes(l)), failed, ok: failed.length === 0 };
+  /* ── Optional capability: directory ── */
+  const anyDir = () => client(seats[0]);
+  await check(3, "directory: a seat is required → 401 unauthenticated", async () => {
+    await refused(new AgentComClient({ baseUrl, endpoints: anyDir().endpoints, headers: o.headers, fetch: f }).directory(), "unauthenticated", 401);
+  }, "directory");
+  await check(3, "directory: entries are {address, name, description, status}", async () => {
+    if (teamSeats.length >= 2 && caps.includes("team")) await client(teamSeats[0]).updateMe({ name: "Shape check" });
+    const entries = await (teamSeats.length >= 2 && caps.includes("team") ? client(teamSeats[1]) : A()).directory({ limit: 50 });
+    assert(Array.isArray(entries), "entries is not a list");
+    if (teamSeats.length >= 2 && caps.includes("team")) assert(entries.length > 0, "a named colleague is not listed");
+    for (const e of entries) {
+      assert(typeof e.address === "string" && /^[a-z][a-z0-9_-]{0,30}:/.test(e.address), `not an address: ${JSON.stringify(e.address)}`);
+      for (const k of ["name", "description", "status"] as const) assert(k in e, `entry ${e.address} has no "${k}"`);
+    }
+  }, "directory");
+  await check(3, "seat: GET /v1/seats/me is the caller's seat; POST names it", async () => {
+    const tag = rand();
+    const me = await A().me();
+    assert(me.address === addr(0), `me is ${me.address}, expected ${addr(0)}`);
+    const after = await A().updateMe({ name: `Conformance ${tag}`, description: `checks the directory ${tag}` });
+    assert(after.name === `Conformance ${tag}` && after.description === `checks the directory ${tag}`, `name/description not kept: ${JSON.stringify(after)}`);
+    assert((await A().me()).name === `Conformance ${tag}`, "the name did not stick");
+  }, "directory");
+  await check(3, "directory: q filters on address, name and description (case-insensitive)", async () => {
+    const tag = rand();
+    const team = teamSeats.length >= 2 && caps.includes("team");
+    /* Colleagues must see each other (spec §6); without two of them, only the filtering itself can be checked. */
+    const [named, searcher, namedAddr] = team ? [client(teamSeats[0]), client(teamSeats[1]), teamSeats[0]!.address] : [A(), B(), addr(0)];
+    await named.updateMe({ name: `Filter ${tag.toUpperCase()}` });
+    const entries = await searcher.directory({ q: tag });
+    for (const e of entries) assert([e.address, e.name ?? "", e.description ?? ""].some((x) => x.toLowerCase().includes(tag)), `entry ${e.address} does not match "${tag}"`);
+    if (team) assert(entries.some((e) => e.address === namedAddr), `a colleague named "Filter ${tag.toUpperCase()}" is not found by q="${tag}"`);
+    const none = await B().directory({ q: `${rand()}${rand()}-nobody` });
+    assert(none.length === 0, `a query matching nothing returned ${none.length} entries`);
+  }, "directory");
+  await check(3, "directory: a named seat is listed to a seat of its own domain", async () => {
+    if (teamSeats.length < 2 || !caps.includes("team")) skip("needs two seats of one domain (teamSeats, or --claim)");
+    const tag = rand();
+    const t1 = client(teamSeats[0]);
+    await t1.updateMe({ name: `Colleague ${tag}`, description: `the colleague ${tag}` });
+    const found = (await client(teamSeats[1]).directory({ q: tag })).find((e) => e.address === teamSeats[0]!.address);
+    assert(found, `${teamSeats[0]!.address} is not listed to its colleague`);
+    assert(found.name === `Colleague ${tag}`, `name is ${found.name}`);
+    assert(found.status === null || typeof found.status === "string", "status must be a string or null");
+  }, "directory");
+
+  /* ── Optional capability: team profile ── */
+  const T = (i: number) => client(teamSeats[i] ?? skip("needs two seats of one domain (teamSeats, or --claim)"));
+  const taddr = (i: number) => teamSeats[i]?.address ?? skip("needs two seats of one domain (teamSeats, or --claim)");
+  let teamDomain: string | null = null;
+  await check(3, "from_domain is stamped from the seat: the domain between colleagues, another from outside", async () => {
+    const q = (await T(0).send(act.request(taddr(1), "Colleague question"))).message;
+    assert(typeof q.from_domain === "string" && q.from_domain, `from_domain between colleagues is ${q.from_domain}`);
+    teamDomain = q.from_domain;
+    const box = await T(1).inbox({ after: q.n - 1 });
+    assert(box.messages.some((m) => m.id === q.id && m.from_domain === teamDomain), "the mailbox does not carry from_domain");
+    const mine = box.domain ?? (caps.includes("directory") ? (await T(1).me()).domain : null);
+    assert(mine === teamDomain, `the recipient's own domain is ${mine}, expected ${teamDomain} (mailbox "domain" or /v1/seats/me)`);
+    const out = (await A().send(act.request(taddr(0), "Question from outside"))).message;
+    assert(out.from_domain !== teamDomain, "a seat outside the domain was stamped with it");
+  }, "team");
+  await check(3, "`from_domain` in a payload → 400 invalid_envelope", async () => {
+    await rawRefused(0, { cid: `fd:${rand()}`, to: taddr(0), act: "inform", text: "I am a colleague", from_domain: teamDomain ?? "acme" }, "invalid_envelope", 400);
+  }, "team");
+  await check(3, "a team thread carries its domain; a thread with an outsider does not", async () => {
+    const q = (await T(0).send(act.request(taddr(1), "Team thread?"))).message;
+    assert((await T(0).thread(q.thread)).thread.domain === q.from_domain, "the team thread has no domain");
+    const x = (await A().send(act.request(taddr(1), "Cross-domain thread?"))).message;
+    const t = (await A().thread(x.thread)).thread;
+    assert(t.domain == null, `a cross-domain thread has domain ${t.domain}`);
+  }, "team");
+  await check(3, "chain: a new thread is depth 0; citing a received message is one deeper, same root; claimed depth ignored", async () => {
+    const q = (await T(0).send(act.request(taddr(1), "Start a chain"))).message;
+    const c0 = chainOf(q);
+    assert(c0 && c0.depth === 0 && c0.root === q.id && c0.parent === null, `chain of a new request: ${JSON.stringify(q.ext.agentcom)}`);
+    const next = act.request(taddr(0), "Acting on it", { cause: q });
+    next.ext = { agentcom: { chain: { parent: q.id, root: "forged", depth: 0 } } };
+    const m = (await T(1).send(next)).message;
+    const c1 = chainOf(m);
+    assert(c1 && c1.depth === 1 && c1.root === q.id && c1.parent === q.id, `chain of the step: ${JSON.stringify(m.ext.agentcom)}`);
+  }, "team");
+  await check(3, "chain: an answer keeps the chain of its thread", async () => {
+    const q = (await T(0).send(act.request(taddr(1), "Root"))).message;
+    const step = (await T(1).send(act.request(taddr(0), "Step", { cause: q }))).message;
+    const ans = (await T(0).send(act.reply(step, "Answer to the step", { auto: true }))).message;
+    const c = chainOf(ans);
+    assert(c && c.depth === 1 && c.root === q.id, `chain of the answer: ${JSON.stringify(ans.ext.agentcom)}`);
+  }, "team");
+  await check(3, "chain: citing a message this seat did not receive → 400 invalid_envelope", async () => {
+    const q = (await T(0).send(act.request(taddr(1), "Not yours"))).message;
+    await refused(A().send(act.request(taddr(0), "Pretending", { cause: q })), "invalid_envelope", 400);
+    await refused(T(0).send(act.request(taddr(1), "My own message", { cause: q })), "invalid_envelope", 400);
+  }, "team");
+  await check(3, "chain deeper than limits.chain_depth → 409 chain_too_deep", async () => {
+    const max = Number(d?.limits?.chain_depth);
+    if (!Number.isInteger(max) || max < 1) skip("the discovery document gives no limits.chain_depth");
+    if (max > 32) skip(`limits.chain_depth is ${max}: too deep to walk in a test`);
+    let last = (await T(0).send(act.request(taddr(1), "Ping"))).message;
+    for (let depth = 1; depth <= max; depth++) {
+      const from = depth % 2; // T1 received the ping, then they alternate
+      last = (await T(from).send(act.request(taddr(1 - from), `Pong ${depth}`, { cause: last }))).message;
+      assert(chainOf(last)?.depth === depth, `depth ${chainOf(last)?.depth}, expected ${depth}`);
+    }
+    const from = (max + 1) % 2;
+    const before = (await T(1 - from).inbox({ after: 0, limit: 1 })).last_n;
+    const tooDeep = act.request(taddr(1 - from), "One step too far", { cause: last });
+    await refused(T(from).send(tooDeep), "chain_too_deep", 409);
+    if (before != null) assert((await T(1 - from).inbox({ after: 0, limit: 1 })).last_n === before, "a refused message took a rank in the mailbox");
+    /* Nothing was stored under its cid: the same cid without the citation is a new message. */
+    const again = await T(from).send({ ...tooDeep, ext: {} });
+    assert(again.created && chainOf(again.message)?.depth === 0, "the cid of the refused message was stored");
+  }, "team");
+
+  const levelResults = results.filter((r) => !r.capability);
+  const lv = [...new Set(levelResults.map((r) => r.level))].sort();
+  const failed = lv.filter((l) => levelResults.some((r) => r.level === l && !r.ok));
+  const checkedCaps = [...new Set(results.filter((r) => r.capability).map((r) => r.capability!))];
+  const failedCaps = checkedCaps.filter((c) => results.some((r) => r.capability === c && !r.ok));
+  const skippedCaps = checkedCaps.filter((c) => !failedCaps.includes(c) && results.filter((r) => r.capability === c).every((r) => r.skipped));
+  return {
+    server: baseUrl, version: d?.version ?? null, claimed, results, passed: lv.filter((l) => !failed.includes(l)), failed,
+    capabilities: { checked: checkedCaps, passed: checkedCaps.filter((c) => !failedCaps.includes(c) && !skippedCaps.includes(c)), failed: failedCaps, skipped: skippedCaps },
+    ok: failed.length === 0 && failedCaps.length === 0,
+  };
 }
 
 /** A readable report, one line per check. */
 export function formatReport(r: ConformanceReport): string {
   const lines = [`AgentCom conformance — ${r.server} (spec ${r.version ?? "?"}, claims levels ${r.claimed.join(", ") || "none"})`];
-  for (const level of [...new Set(r.results.map((x) => x.level))].sort()) {
+  const line = (x: CheckResult) => `  ${x.skipped ? "SKIP" : x.ok ? "PASS" : "FAIL"}  ${x.name}${x.error ? ` — ${x.error}` : ""}`;
+  for (const level of [...new Set(r.results.filter((x) => !x.capability).map((x) => x.level))].sort()) {
     lines.push(`\nLevel ${level}`);
-    for (const x of r.results.filter((y) => y.level === level)) lines.push(`  ${x.skipped ? "SKIP" : x.ok ? "PASS" : "FAIL"}  ${x.name}${x.error ? ` — ${x.error}` : ""}`);
+    for (const x of r.results.filter((y) => !y.capability && y.level === level)) lines.push(line(x));
+  }
+  for (const cap of r.capabilities.checked) {
+    lines.push(`\nCapability: ${cap}`);
+    for (const x of r.results.filter((y) => y.capability === cap)) lines.push(line(x));
   }
   const total = r.results.length;
   const fails = r.results.filter((x) => !x.ok).length;
-  lines.push(`\n${total - fails}/${total} checks passed. Levels passed: ${r.passed.join(", ") || "none"}${r.failed.length ? `; failed: ${r.failed.join(", ")}` : ""}.`);
+  const capsLine = r.capabilities.checked.length ? ` Capabilities passed: ${r.capabilities.passed.join(", ") || "none"}${r.capabilities.failed.length ? `; failed: ${r.capabilities.failed.join(", ")}` : ""}${r.capabilities.skipped.length ? `; not proven (checks skipped): ${r.capabilities.skipped.join(", ")}` : ""}.` : "";
+  lines.push(`\n${total - fails}/${total} checks passed. Levels passed: ${r.passed.join(", ") || "none"}${r.failed.length ? `; failed: ${r.failed.join(", ")}` : ""}.${capsLine}`);
   return lines.join("\n");
 }

@@ -6,13 +6,13 @@ export const VERSION = "agentcom/1-draft";
 /** Every `v` value a v1 receiver must accept (same major). */
 export const SUPPORTED_VERSIONS = ["agentcom/1-draft", "agentcom/1"];
 /** The semver of the specification this SDK implements (sent in the AgentCom-Version header). */
-export const SPEC_VERSION = "1.0.0-rc.1";
+export const SPEC_VERSION = "1.0.0-rc.2";
 export const PROTOCOL = "agentcom";
 export const ACTS = ["request", "reply", "inform", "propose", "accept", "reject", "followup", "close"];
 /** Acts that may open a new thread (no `thread` in the draft). */
 export const OPENERS = ["request", "inform", "propose"];
 /** Standard reject reasons (the core field `reason`, only on a `reject`). Implementations may add their own snake_case codes. */
-export const REJECT_REASONS = ["declined", "closed_without_answer", "act_not_understood", "ext_not_understood", "quota"];
+export const REJECT_REASONS = ["declined", "closed_without_answer", "act_not_understood", "ext_not_understood", "quota", "chain_too_deep"];
 export const TEXT_MAX = 4000;
 export const TITLE_MAX = 80;
 export const CID_MAX = 200;
@@ -38,7 +38,7 @@ export function address(space, id) {
     return a;
 }
 /** The core fields. An extension key that reuses one of these names is dropped: the core wins. */
-export const CORE_FIELDS = ["v", "id", "n", "cid", "from", "to", "act", "thread", "in_reply_to", "subject", "title", "text", "due", "ext", "ext_required", "reason", "at"];
+export const CORE_FIELDS = ["v", "id", "n", "cid", "from", "from_domain", "to", "act", "thread", "in_reply_to", "subject", "title", "text", "due", "ext", "ext_required", "reason", "at"];
 export function stripCoreFromExt(ext) {
     const out = {};
     for (const [k, v] of Object.entries(ext ?? {})) {
@@ -69,6 +69,8 @@ export function validateDraft(d) {
     const x = d;
     if ("from" in x)
         e.push("`from` is never declared: the host stamps it");
+    if ("from_domain" in x)
+        e.push("`from_domain` is never declared: the server stamps it from the seat");
     if (typeof x.cid !== "string" || !x.cid.trim() || x.cid.length > CID_MAX)
         e.push(`cid expected (1 to ${CID_MAX} characters)`);
     if (!isAddress(x.to))
@@ -109,6 +111,17 @@ export function validateDraft(d) {
             }
             if (JSON.stringify(x.ext).length > EXT_MAX)
                 e.push(`ext: ${EXT_MAX} characters max`);
+            const ac = x.ext.agentcom;
+            const chain = ac && typeof ac === "object" ? ac.chain : undefined;
+            if (chain != null) {
+                if (typeof chain !== "object" || Array.isArray(chain))
+                    e.push("ext.agentcom.chain: an object {parent}");
+                else {
+                    const parent = chain.parent;
+                    if (parent != null && (typeof parent !== "string" || !UUID.test(parent)))
+                        e.push("ext.agentcom.chain.parent: the id of a message this seat received");
+                }
+            }
         }
     }
     return e;
@@ -151,7 +164,8 @@ export function validateEnvelope(m) {
 /** Fills the optional fields of a received envelope with their defaults (null, {}, []), and drops ext keys that shadow core fields. */
 export function normalizeEnvelope(m) {
     return {
-        v: String(m.v ?? VERSION), id: String(m.id), n: Number(m.n), cid: String(m.cid ?? ""), from: String(m.from), to: String(m.to),
+        v: String(m.v ?? VERSION), id: String(m.id), n: Number(m.n), cid: String(m.cid ?? ""), from: String(m.from),
+        from_domain: typeof m.from_domain === "string" && m.from_domain ? m.from_domain : null, to: String(m.to),
         act: m.act, thread: String(m.thread), in_reply_to: m.in_reply_to ?? null, subject: m.subject ?? null, title: m.title ?? null,
         text: String(m.text ?? ""), due: m.due ?? null, ext: stripCoreFromExt(m.ext ?? {}),
         ext_required: Array.isArray(m.ext_required) ? m.ext_required.map(String) : [], reason: m.reason ?? null, at: String(m.at),
@@ -168,9 +182,13 @@ export const ERROR_STATUS = {
     invalid_transition: 409,
     conflict: 409,
     seat_taken: 409,
+    domain_taken: 409,
+    chain_too_deep: 409,
     text_too_long: 413,
     unsupported_version: 426,
     rate_limited: 429,
+    budget_exhausted: 429,
+    unavailable: 503,
 };
 /** A refusal from a server ({"error", "message"}), or a local validation failure. */
 export class AgentComError extends Error {

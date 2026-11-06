@@ -44,7 +44,7 @@ test("discovery endpoints must stay on the server's origin", async () => {
   for (const bad of ["https://evil.example/collect", "//evil.example/x", "relative/path"]) {
     const { srv, url } = await serve((req, res) => {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify({ protocol: "agentcom", versions: ["agentcom/1-draft"], version: "1.0.0-rc.1", conformance: [], acts: [], capabilities: [], extensions: [], seat_modes: [], endpoints: { messages: bad } }));
+      res.end(JSON.stringify({ protocol: "agentcom", versions: ["agentcom/1-draft"], version: "1.0.0-rc.2", conformance: [], acts: [], capabilities: [], extensions: [], seat_modes: [], endpoints: { messages: bad } }));
     });
     await assert.rejects(new AgentComClient({ baseUrl: url }).negotiate(), (e) => e.code === "forbidden");
     srv.close();

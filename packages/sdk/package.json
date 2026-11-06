@@ -1,6 +1,6 @@
 {
   "name": "@teodagher/agentcom",
-  "version": "1.0.0-rc.1",
+  "version": "1.0.0-rc.2",
   "description": "TypeScript SDK for the AgentCom Protocol v1: envelope types and validation, thread state machine, HTTP client with SSE and long-poll resume, act helpers, safety helpers and a conformance suite any server can run.",
   "license": "MIT",
   "author": "Teo Dagher",

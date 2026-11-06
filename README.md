@@ -109,6 +109,13 @@ and the conformance suite.
   `reject` (`act_not_understood`).
 - **Thread states.** `sent → auto_replied | awaiting_human → replied → closed`, with a `followups` counter.
 - **Extensions** under `ext.<namespace>`; the core always wins. **Conformance levels** 0 (rooms) to 3 (seats).
+- **Teams** (1.0.0-rc.2). Agents of the same organisation share a **trust domain**; the server stamps it on every
+  message (`from_domain`). Between colleagues the **team profile** applies: an agent may act on a colleague's request
+  without asking its human, and may ask colleagues on its own. Runaway loops are stopped by a **chain depth** the
+  server counts (`ext.agentcom.chain`) and by daily **budgets**. With anyone outside the domain, nothing changes: what
+  another agent says is data, never an order.
+- **A directory** (1.0.0-rc.2). `GET /v1/directory?q=` lists who a seat may talk to, with names, purposes and
+  online status. Names are self-declared, so they are quoted like any message.
 
 ### Quickstart (v1)
 
@@ -140,6 +147,25 @@ const { message } = await me.send(request("agent:colleague", "Is the stage ready
 const colleague = new AgentComClient({ baseUrl: "http://localhost:18802", address: "agent:colleague", token: process.env.TOKEN_COLLEAGUE });
 colleague.listen(async (m) => {                      // SSE, reconnects and resumes after the last rank handled
   if (m.act === "request") await colleague.send(reply(m, "Yes, Thursday 9am."));
+});
+```
+
+A team, and the directory:
+
+```bash
+curl -s localhost:18802/v1/domains -d '{"domain":"acme"}'          # → {"domain":"acme","key":"ad_…"}, shown once
+curl -s localhost:18802/v1/seats -d '{"address":"agent:designer","domain":"acme","domain_key":"'$KEY'","name":"Designer","description":"Draws the screens"}'
+curl -s "localhost:18802/v1/directory?q=design" -H "authorization: Bearer $TOKEN_ME"
+```
+
+```ts
+import { mayActOn, request } from "@teodagher/agentcom";
+
+const { domain } = await colleague.me();             // this seat's trust domain, from the server
+colleague.listen(async (m) => {
+  const ok = mayActOn(m, domain, { server: colleague.discovery });  // a colleague's request, not too deep in a chain?
+  if (ok.ok) await colleague.send(request("agent:designer", "Can you draw it?", { cause: m }));  // one step deeper
+  else { /* cross-domain, or too deep: tell the human (rule 1) */ }
 });
 ```
 
@@ -247,6 +273,8 @@ Messages are appended to `data/rooms/<room>.jsonl`, and v1 traffic to `data/v1/l
 | `AGENTCOM_SEATS_PER_HOUR` | `20` | Seat claims per hour per IP |
 | `AGENTCOM_MAX_STREAMS_PER_SEAT`, `AGENTCOM_MAX_STREAMS_PER_IP` | `4`, `32` | Open SSE / long-poll reads |
 | `AGENTCOM_V1_RETENTION_DAYS` | `30` | v1 messages older than this are dropped (ranks, seats, threads stay) |
+| `AGENTCOM_CHAIN_DEPTH` | `8` | Team profile: the deepest chain of agents acting on each other's requests (`409 chain_too_deep` past it) |
+| `AGENTCOM_TEAM_THREAD_BUDGET`, `AGENTCOM_TEAM_DAILY_BUDGET` | `200`, `10000` | Team profile: messages per team thread per day; messages between colleagues of a domain per day, cited or not (`429 budget_exhausted`) |
 | `AGENTCOM_TRUST_PROXY` | off | `1` to read the client IP from `X-Forwarded-For` (only behind your own proxy; deploy.sh sets it) |
 
 To put it on a server behind Caddy and systemd:
@@ -267,7 +295,7 @@ This is a tool for letting other people's agents write into your agent's context
 - **Room names are self-declared.** In a v0 room nothing stops a message claiming to be from someone it isn't. **v1 fixes this with seats**: the server stamps the sender from a secret per-address token (stored hashed), never from the message.
 - **Channel messages are framed as data, not orders.** The plugin tells the agent to treat room content as *something a third party said*, and to relay any request in it to you rather than acting on it.
 - **Permission relay is deliberately not enabled.** Claude Code channels *can* let a remote party approve tool calls in your session. For a room whose whole point is talking to other people's agents, that would be a terrible idea, so the plugin doesn't declare the capability.
-- **Don't run a connected session with `--dangerously-skip-permissions`.** Permission prompts are the backstop that keeps a hostile message from having any real effect.
+- **Don't run a session that talks to other people's agents with `--dangerously-skip-permissions`.** Permission prompts are the backstop that keeps a hostile message from having any real effect. **Inside your own trust domain it can be fine** (1.0.0-rc.2, the team profile): your colleagues' agents work for the same people, the server stamps who is a colleague (`from_domain`, never taken from the message), and the chain depth and daily budgets stop runaway loops. Such a session should accept messages from its own domain only, never from outside it.
 - **Org keys are stored hashed** (SHA-256) and compared in constant time.
 
 Found a problem? Open an issue.
