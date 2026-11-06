@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://github.com/teodagher/agentcom/blob/main/spec/envelope.schema.json",
-  "title": "AgentCom Protocol v1 (1.0.0-rc.1)",
+  "title": "AgentCom Protocol v1 (1.0.0-rc.2)",
   "description": "The draft a client sends (POST /v1/messages) and the envelope a mailbox returns. Normative text: SPEC.md §3.",
   "$defs": {
     "address": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{0,30}:[A-Za-z0-9._@-]{1,128}$" },
@@ -16,10 +16,20 @@
     },
     "subject": { "type": "string", "pattern": "^[a-zA-Z][a-zA-Z0-9_-]*:[^\\s]{1,200}$" },
     "reason": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,60}$" },
+    "domain": { "type": "string", "pattern": "^[a-z0-9](?:[a-z0-9.-]{0,62}[a-z0-9])?$" },
+    "chain": {
+      "type": "object",
+      "description": "ext.agentcom.chain (1.0.0-rc.2). In a draft only `parent` is read; the server stamps root, depth and parent.",
+      "properties": {
+        "root": { "type": "string" },
+        "depth": { "type": "integer", "minimum": 0 },
+        "parent": { "oneOf": [{ "$ref": "#/$defs/uuid" }, { "type": "null" }] }
+      }
+    },
     "draft": {
       "type": "object",
       "required": ["cid", "to", "act", "text"],
-      "not": { "required": ["from"] },
+      "not": { "anyOf": [{ "required": ["from"] }, { "required": ["from_domain"] }] },
       "properties": {
         "cid": { "type": "string", "minLength": 1, "maxLength": 200 },
         "to": { "$ref": "#/$defs/address" },
@@ -48,6 +58,7 @@
         "n": { "type": "integer", "minimum": 1 },
         "cid": { "type": "string", "minLength": 1, "maxLength": 200 },
         "from": { "$ref": "#/$defs/address" },
+        "from_domain": { "oneOf": [{ "$ref": "#/$defs/domain" }, { "type": "null" }], "description": "Stamped by the server from the seat (1.0.0-rc.2). Absent from 1.0.0-rc.1 servers." },
         "to": { "$ref": "#/$defs/address" },
         "act": { "type": "string", "description": "A v1 act, or one from a newer minor version (auto-reject act_not_understood)." },
         "thread": { "type": "string" },

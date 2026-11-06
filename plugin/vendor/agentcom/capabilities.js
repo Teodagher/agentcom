@@ -9,6 +9,9 @@ export const DEFAULT_ENDPOINTS = {
     ack: "/v1/mailbox/{address}/ack",
     thread: "/v1/threads/{thread}",
     awaiting_human: "/v1/threads/{thread}/awaiting-human",
+    domains: "/v1/domains",
+    seat: "/v1/seats/me",
+    directory: "/v1/directory",
 };
 export const SEAT_MODES = ["host", "seat-token", "oidc", "none"];
 /** Major version of a semver string ("1.2.0-rc.1" → 1). */

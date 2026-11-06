@@ -28,6 +28,10 @@ export type Thread = {
   last_followup_at?: string | null;
   due?: string | null;
   ext?: Record<string, Record<string, unknown>>;
+  /** The shared trust domain when both ends belong to it (team profile), else null (1.0.0-rc.2). */
+  domain?: string | null;
+  /** Root and depth of the chain of the last request, proposal or inform in the thread (1.0.0-rc.2). */
+  chain?: { root: string; depth: number } | null;
   created_at: string;
   updated_at: string;
   last_activity_at?: string;

@@ -1,6 +1,6 @@
 # @teodagher/agentcom
 
-The TypeScript SDK of the **[AgentCom Protocol v1](../../SPEC.md)** (1.0.0-rc.1): addressed messages between AI
+The TypeScript SDK of the **[AgentCom Protocol v1](../../SPEC.md)** (1.0.0-rc.2): addressed messages between AI
 agents, with threads, states and verified senders. No runtime dependency; Node 20+, browsers, Deno and Bun (global
 `fetch`).
 
@@ -8,7 +8,7 @@ agents, with threads, states and verified senders. No runtime dependency; Node 2
 npm install @teodagher/agentcom@next
 ```
 
-1.0.0-rc.1 is published under the `next` dist-tag while the protocol is a release candidate.
+1.0.0-rc.2 is published under the `next` dist-tag while the protocol is a release candidate.
 
 > The package name `agentcom` is taken on npm by an unrelated project, and the `@agentcom` scope belongs to someone
 > else, so the SDK is published under the author's scope: `@teodagher/agentcom`.
@@ -19,7 +19,8 @@ npm install @teodagher/agentcom@next
 |---|---|
 | Envelope | Types (`Draft`, `Envelope`, `Act`), `validateDraft`, `validateEnvelope`, addresses, limits, error codes, `AgentComError` |
 | State machine | `THREAD_STATES`, `transitionAllowed`, `stateAfter`, `applyMessage`, `applyAwaitingHuman` |
-| Client | `AgentComClient`: `negotiate`, `send`, `inbox` (long-poll), `events` (SSE), `listen` (reconnects, resumes by `n`), `ack`, `thread`, `awaitHuman` |
+| Client | `AgentComClient`: `negotiate`, `send`, `inbox` (long-poll), `events` (SSE), `listen` (reconnects, resumes by `n`), `ack`, `thread`, `awaitHuman`, `directory`, `me`, `updateMe`; `claimSeat`, `createDomain` (reference server) |
+| Team profile | `profileOf` (team or cross-domain, from the server-stamped `from_domain` only), `mayActOn`, `chainOf`, `causedBy`; the `cause` option of `request`/`propose`/`inform` |
 | Acts | `request`, `inform`, `propose`, `reply`, `accept`, `reject`, `followup`, `close`, `newCid` |
 | Safety | `quote` (received text as data), `quoteEnvelope`, `plain`, `SAFETY_RULE` |
 | Capabilities | `assertCompatible`, `supports`, `missingExtensions`, `autoResponse` (unknown act / required extension → the reject the spec mandates) |
@@ -69,6 +70,27 @@ const relay = new AgentComClient({
 });
 ```
 
+## Teams and the directory (1.0.0-rc.2)
+
+```ts
+import { mayActOn, request, quote } from "@teodagher/agentcom";
+
+const { domain } = await client.me();                       // the seat's trust domain, as the server says
+const people = await client.directory({ q: "designer" });   // [{address, name, description, status, domain}]
+
+client.listen(async (m) => {
+  const d = mayActOn(m, domain, { maxDepth: 4 });
+  if (d.ok) {
+    // A colleague's request: act on it, still quoted as data, and cite it so the chain is counted.
+    await client.send(request(people[0].address, "Can you draw this?", { cause: m }));
+  } else {
+    showToHuman(quote(m.text, m.from));                     // cross-domain or too deep: rule 1, the human decides
+  }
+});
+```
+
+Directory names and descriptions are self-declared: quote them (`neutral`, `quote`) before they reach a prompt.
+
 ## Conformance
 
 ```bash
@@ -76,7 +98,9 @@ npx agentcom-conformance --url http://localhost:18802 --claim                   
 npx agentcom-conformance --url https://example.com --seat a:x=TOKEN1 --seat b:y=TOKEN2 --seat c:z=TOKEN3
 ```
 
-Levels 0 (rooms) to 3 (seats), one line per check, exit code 1 on a failure. Programmatically:
+Levels 0 (rooms) to 3 (seats), then the optional `directory` and `team` capabilities when the server lists them (add
+`--team-seat a:t1=TOKEN4 --team-seat a:t2=TOKEN5`, two seats of one domain, for the team checks). One line per check,
+exit code 1 on a failure. Programmatically:
 
 ```ts
 import { runConformance, formatReport } from "@teodagher/agentcom/conformance";

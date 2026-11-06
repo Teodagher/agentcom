@@ -1,6 +1,7 @@
 // One helper per act: they build a valid draft from what you have at hand (a received envelope, a thread id), so the
 // threading fields (to, thread, in_reply_to) are always right. Nothing is sent here: pass the draft to `client.send`.
 import type { Draft, Envelope, Ext, RejectReason } from "./envelope.js";
+import { causedBy } from "./team.js";
 
 /** A fresh idempotency key. Keep it if you retry: the same cid never creates a second message. */
 export function newCid(prefix = "c"): string {
@@ -10,7 +11,8 @@ export function newCid(prefix = "c"): string {
 }
 
 type Common = { cid?: string; ext?: Ext; ext_required?: string[] };
-type Opening = Common & { subject?: string | null; title?: string | null; due?: string | null };
+/** `cause`: the received message this one acts on (team profile). The server makes it one step deeper in that chain. */
+type Opening = Common & { subject?: string | null; title?: string | null; due?: string | null; cause?: Envelope | string };
 /** Where an answer goes: the envelope being answered (preferred), or the thread and the other end. */
 type Target = Envelope | { thread: string; to: string; in_reply_to?: string | null };
 
@@ -18,7 +20,8 @@ const clean = <T extends Record<string, unknown>>(o: T): T => Object.fromEntries
 const target = (t: Target) => ("from" in t && "id" in t ? { to: t.from, thread: t.thread, in_reply_to: t.id } : { to: t.to, thread: t.thread, in_reply_to: t.in_reply_to ?? null });
 
 function opener(act: "request" | "inform" | "propose", to: string, text: string, o: Opening = {}): Draft {
-  return clean({ cid: o.cid ?? newCid(act), to, act, text, subject: o.subject, title: o.title, due: o.due, ext: o.ext, ext_required: o.ext_required });
+  const ext = o.cause ? causedBy(o.cause, o.ext) : o.ext;
+  return clean({ cid: o.cid ?? newCid(act), to, act, text, subject: o.subject, title: o.title, due: o.due, ext, ext_required: o.ext_required });
 }
 
 /** Ask a question or for an action; an answer is expected. Opens a thread. */

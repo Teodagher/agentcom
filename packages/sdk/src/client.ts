@@ -25,7 +25,14 @@ export type ClientOptions = {
 
 export type SendResult = { message: Envelope; thread: Thread | null; created: boolean };
 /** `address`: the mailbox's address, when the server says it (servers that derive it from the token always do). */
-export type InboxResult = { address: string | null; messages: Envelope[]; last_n: number | null; acked_n: number | null };
+export type InboxResult = { address: string | null; domain: string | null; messages: Envelope[]; last_n: number | null; acked_n: number | null };
+
+/** One address the caller may talk to (capability `directory`). Name and description are self-declared: quote them. */
+export type DirectoryEntry = { address: string; name: string | null; description: string | null; status: "online" | "offline" | string | null; domain?: string | null };
+/** The caller's own seat, as `GET /v1/seats/me` returns it. */
+export type SeatInfo = { address: string; domain: string | null; name: string | null; description: string | null; claimed?: string };
+export type SeatClaim = SeatInfo & { token: string };
+
 
 export type ListenOptions = {
   /** Start after this rank (default 0: everything still in the mailbox). */
@@ -98,10 +105,11 @@ export class AgentComClient {
     const q = new URLSearchParams({ after: String(o.after ?? 0) });
     if (o.wait) q.set("wait", String(o.wait));
     if (o.limit) q.set("limit", String(o.limit));
-    const r = await this.call<{ address?: string; messages?: Envelope[]; last_n?: number; acked_n?: number }>("GET", `${this.path("mailbox")}?${q}`, undefined, { signal: o.signal });
+    const r = await this.call<{ address?: string; domain?: string | null; messages?: Envelope[]; last_n?: number; acked_n?: number }>("GET", `${this.path("mailbox")}?${q}`, undefined, { signal: o.signal });
     if (typeof r.address === "string" && !this.address) this.address = r.address;
     return {
       address: typeof r.address === "string" ? r.address : null,
+      domain: typeof r.domain === "string" && r.domain ? r.domain : null,
       messages: (r.messages ?? []).filter((m) => validateEnvelope(m).length === 0).map((m) => normalizeEnvelope(m as Envelope & Record<string, unknown>)),
       last_n: typeof r.last_n === "number" ? r.last_n : null,
       acked_n: typeof r.acked_n === "number" ? r.acked_n : null,
@@ -117,6 +125,31 @@ export class AgentComClient {
   async thread(id: string): Promise<{ thread: Thread; messages: Envelope[] }> {
     const r = await this.call<{ thread: Thread; messages: Envelope[] }>("GET", this.path("thread", id));
     return { thread: r.thread, messages: (r.messages ?? []).map((m) => normalizeEnvelope(m as Envelope & Record<string, unknown>)) };
+  }
+
+  /**
+   * Who this seat may talk to (capability `directory`): `{address, name, description, status}` entries, filtered by `q`
+   * (case-insensitive, on address, name and description). The server decides what each seat may see.
+   */
+  async directory(o: { q?: string; limit?: number; signal?: AbortSignal } = {}): Promise<DirectoryEntry[]> {
+    const q = new URLSearchParams();
+    if (o.q) q.set("q", o.q);
+    if (o.limit) q.set("limit", String(o.limit));
+    const qs = q.toString();
+    const r = await this.call<{ entries?: DirectoryEntry[] }>("GET", `${this.path("directory")}${qs ? `?${qs}` : ""}`, undefined, { signal: o.signal });
+    return (r.entries ?? []).filter((e) => e && typeof e.address === "string");
+  }
+
+  /** This seat as the server knows it: address, trust domain, name and description (capability `directory`). */
+  async me(): Promise<SeatInfo> {
+    const r = await this.call<SeatInfo>("GET", this.path("seat"));
+    if (!this.address && typeof r.address === "string") this.address = r.address;
+    return r;
+  }
+
+  /** Names this seat in the directory (name, description; null clears). The address and the domain never change. */
+  async updateMe(p: { name?: string | null; description?: string | null }): Promise<SeatInfo> {
+    return this.call<SeatInfo>("POST", this.path("seat"), p);
   }
 
   /** The recipient tells the requester it is asking its human (sent → awaiting_human). */
@@ -234,4 +267,29 @@ export class AgentComClient {
   private async call<T>(method: string, path: string, body?: unknown, o: { signal?: AbortSignal; auth?: boolean } = {}): Promise<T> {
     return (await this.callFull<T>(method, path, body, o)).body;
   }
+}
+
+/* ── Reference server registration (seat-token mode) ── */
+type RegisterOptions = { fetch?: typeof fetch; adminToken?: string; headers?: Record<string, string>; path?: string };
+
+async function register<T>(baseUrl: string, path: string, body: unknown, o: RegisterOptions): Promise<T> {
+  const f = o.fetch ?? globalThis.fetch.bind(globalThis);
+  const headers: Record<string, string> = { "content-type": "application/json", accept: "application/json", "agentcom-version": SPEC_VERSION, ...(o.headers ?? {}) };
+  if (o.adminToken) headers.authorization = `Bearer ${o.adminToken}`;
+  const res = await f(`${baseUrl.replace(/\/+$/, "")}${path}`, { method: "POST", headers, body: JSON.stringify(body) });
+  const text = await res.text();
+  let j: Record<string, unknown> = {};
+  try { j = JSON.parse(text); } catch { /* plain text */ }
+  if (!res.ok) throw new AgentComError(String(j.error ?? `http_${res.status}`), String(j.message ?? text), res.status, j);
+  return j as T;
+}
+
+/** Claims a seat (`POST /v1/seats`). The token is returned once. `domain` + `domain_key` put the seat in a trust domain. */
+export function claimSeat(baseUrl: string, seat: { address: string; domain?: string; domain_key?: string; name?: string; description?: string }, o: RegisterOptions = {}): Promise<SeatClaim> {
+  return register<SeatClaim>(baseUrl, o.path ?? "/v1/seats", seat, o);
+}
+
+/** Creates a trust domain (`POST /v1/domains`). Its key, returned once, is what lets a seat join it. */
+export function createDomain(baseUrl: string, domain: string, o: RegisterOptions = {}): Promise<{ domain: string; key: string }> {
+  return register<{ domain: string; key: string }>(baseUrl, o.path ?? "/v1/domains", { domain }, o);
 }

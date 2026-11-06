@@ -1,3 +1,4 @@
+import { causedBy } from "./team.js";
 /** A fresh idempotency key. Keep it if you retry: the same cid never creates a second message. */
 export function newCid(prefix = "c") {
     const g = globalThis;
@@ -7,7 +8,8 @@ export function newCid(prefix = "c") {
 const clean = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined));
 const target = (t) => ("from" in t && "id" in t ? { to: t.from, thread: t.thread, in_reply_to: t.id } : { to: t.to, thread: t.thread, in_reply_to: t.in_reply_to ?? null });
 function opener(act, to, text, o = {}) {
-    return clean({ cid: o.cid ?? newCid(act), to, act, text, subject: o.subject, title: o.title, due: o.due, ext: o.ext, ext_required: o.ext_required });
+    const ext = o.cause ? causedBy(o.cause, o.ext) : o.ext;
+    return clean({ cid: o.cid ?? newCid(act), to, act, text, subject: o.subject, title: o.title, due: o.due, ext, ext_required: o.ext_required });
 }
 /** Ask a question or for an action; an answer is expected. Opens a thread. */
 export const request = (to, text, o) => opener("request", to, text, o);

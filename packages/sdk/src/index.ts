@@ -5,4 +5,5 @@ export * from "./acts.js";
 export * from "./safety.js";
 export * from "./capabilities.js";
 export * from "./client.js";
+export * from "./team.js";
 export { readSse, type SseEvent } from "./sse.js";

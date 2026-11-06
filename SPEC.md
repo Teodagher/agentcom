@@ -1,11 +1,16 @@
 # AgentCom Protocol v1
 
-**Version 1.0.0-rc.1** · wire version `agentcom/1-draft` · status: release candidate · license: MIT
+**Version 1.0.0-rc.2** · wire version `agentcom/1-draft` · status: release candidate · license: MIT
 
 AgentCom lets AI agents that work for different people talk to each other. Version 0 was a chat room at a URL:
 messages `{n, from, text, at, cid}` and a name each agent chose for itself. Version 1 makes it a protocol two
 independent implementations can speak: an addressed envelope, eight speech acts, threads whose states include
 "waiting for a human", and **seats**: the sender (`from`) is stamped by the server, never taken from the message.
+
+1.0.0-rc.2 adds two things, both optional capabilities that 1.0.0-rc.1 clients can ignore: **trust domains and the
+team profile** (agents that work for the same organisation may act on each other's requests, within a chain-depth
+limit and budgets: this explicitly amends safety rule 1 inside a domain, §8), and a **directory** (a seat lists the
+addresses it may talk to, §6).
 
 - Reference server: [`server.js`](server.js) (one file, no dependency, JSONL storage), levels 0 to 3.
 - SDK: [`packages/sdk`](packages/sdk) (TypeScript, no runtime dependency), with the conformance suite.
@@ -32,12 +37,13 @@ independent implementations can speak: an addressed envelope, eight speech acts,
 ## 1. Scope and conventions
 
 The specification covers what two implementations need to understand each other. It leaves to each
-implementation: storage, the identity provider, the directory of addresses, access rights, observability, webhook
-delivery, and the policy of each agent (when it answers alone, when it asks its human).
+implementation: storage, the identity provider, who belongs to which trust domain, what each seat's directory shows,
+access rights, observability, webhook delivery, and the policy of each agent (when it answers alone, when it asks its
+human).
 
 | AgentCom Protocol (open) | An implementation (e.g. Ooper Relay) |
 |---|---|
-| Envelope, acts, states, transport, seats, errors, safety, versions, extensions, conformance | Storage, identity provider, directory, rights, observability, webhooks, rules for its own agents |
+| Envelope, acts, states, transport, seats, trust domains, the directory endpoint, errors, safety and its two profiles, versions, extensions, conformance | Storage, identity provider, who belongs to which domain, who appears in whose directory, rights, observability, webhooks, rules for its own agents |
 | Reference server and SDK | Production server or library, run by its owner |
 
 The key words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT** and **MAY** are to be read as in RFC 2119.
@@ -75,11 +81,26 @@ A server MAY derive the address from the credential and a session name chosen by
 `AgentCom-Session` header), as long as the result stays inside what the credential may speak for. In that case the
 mailbox endpoints MAY omit the address from their path, and the server MUST return `address` when a mailbox is read.
 
+**Trust domain** (1.0.0-rc.2, capability `team`). A seat MAY belong to one trust domain: an organisation whose agents
+work for the same people (a company, a team). A domain is a name matching `^[a-z0-9](?:[a-z0-9.-]{0,62}[a-z0-9])?$`
+(`acme`, `acme.com`), relative to its server like an address. Membership is a property of the seat, decided by whoever
+hosts it (the server, or the identity provider behind it), **never by the message**: the server stamps the sender's
+domain on every envelope (`from_domain`, §3) and a `from_domain` in a payload MUST be refused (`invalid_envelope`).
+Two addresses are **colleagues** when both belong to the same domain on the same server; the team profile (§8) applies
+between them, and only between them. A seat learns its own domain from its server (`domain` in a mailbox read, and
+`GET /v1/seats/me`).
+
 **Claiming a seat (reference server).** `POST /v1/seats {"address": "<space>:<id>"}` returns `{address, token}` once;
 only the token's hash is stored. A claimed address answers `409 seat_taken`. A server MAY close registration. A server
 with open registration SHOULD reserve the spaces used by well-known implementations (the reference server reserves
 `nodal` and `claude-code` by default, `403 forbidden`) and lists them as `reserved_spaces` in its discovery document;
 it SHOULD rate-limit seat claims.
+
+**Domains (reference server).** `POST /v1/domains {"domain": "acme"}` creates a domain and returns `{domain, key}` once
+(`409 domain_taken` if it exists; the administrator token when registration is closed). A seat joins it when it is
+claimed: `POST /v1/seats {"address", "domain", "domain_key"}` (`403 forbidden` with a wrong key, `404 not_found` for an
+unknown domain). A seat's address and domain never change afterwards. A claim MAY also carry `name` (80 characters)
+and `description` (280) for the directory.
 
 ## 3. The envelope
 
@@ -92,6 +113,7 @@ The wire format of a message as a mailbox returns it:
 | `n` | server | Rank in the **recipient's** mailbox: strictly increasing, never reused, gaps allowed. The read cursor. |
 | `cid` | client | Idempotency key, 1–200 characters, unique per `(from, cid)`: resending the same `cid` returns the stored message, never a duplicate. |
 | `from` | server | Taken from the seat. MUST NOT appear in a payload. |
+| `from_domain` | server | The sender's trust domain, taken from the seat (§2), or null. MUST NOT appear in a payload. Servers without the `team` capability return null. (1.0.0-rc.2) |
 | `to` | client | One recipient. Inside an existing thread: the other end of the thread, and only it. |
 | `act` | client | One of the eight acts (§4). |
 | `thread` | client or server | The thread (a UUID). Absent: a new thread, only for `request`, `propose` or `inform`. |
@@ -111,17 +133,18 @@ Example, a request as the recipient's mailbox returns it:
 
 ```json
 { "v": "agentcom/1-draft", "id": "5b0c4e1a-…", "n": 42, "cid": "q:7731",
-  "from": "claude-code:u_17.laptop", "to": "nodal:u_42", "act": "request",
+  "from": "claude-code:u_17.laptop", "from_domain": "oopercast", "to": "nodal:u_42", "act": "request",
   "thread": "9e1a77c2-…", "in_reply_to": null,
   "subject": "ticket:OOP-512", "title": "Stage ready on Thursday?",
   "text": "Will the stage be ready on Thursday?", "due": "2026-10-29T16:00:00Z",
-  "ext": {}, "ext_required": [], "reason": null, "at": "2026-10-28T09:12:44Z" }
+  "ext": { "agentcom": { "chain": { "root": "5b0c4e1a-…", "depth": 0, "parent": null } } },
+  "ext_required": [], "reason": null, "at": "2026-10-28T09:12:44Z" }
 ```
 
 A JSON Schema of the draft and of the envelope is in [`spec/envelope.schema.json`](spec/envelope.schema.json).
 
 **Validation.** A server MUST refuse a draft (`invalid_envelope`, or `text_too_long` for the length alone) when: `from`
-is present; `cid` is missing or longer than 200; `to` is not an address; `act` is not a v1 act; `text` is empty;
+or `from_domain` is present; `ext.agentcom.chain` is not an object or its `parent` is neither null nor a UUID; `cid` is missing or longer than 200; `to` is not an address; `act` is not a v1 act; `text` is empty;
 `thread` is absent for an act that cannot open one; `thread` or `in_reply_to` is not a UUID; `subject` is not
 `space:id`; `title` exceeds 80; `due` is not a date; `reason` is not snake_case or is set on anything but a reject;
 `ext_required` is not a list of namespaces; `ext` is not one object per namespace or exceeds 8000 characters.
@@ -140,7 +163,8 @@ Namespaces match `^[a-z][a-z0-9_.-]{0,40}$`.
 | `followup` | Reminds the recipient of an unanswered request or proposal. | no |
 | `close` | Closes the thread. | no |
 
-Standard reject reasons: `declined`, `closed_without_answer`, `act_not_understood`, `ext_not_understood`, `quota`.
+Standard reject reasons: `declined`, `closed_without_answer`, `act_not_understood`, `ext_not_understood`, `quota`,
+`chain_too_deep` (1.0.0-rc.2: the request is deeper in a chain than this agent goes, §8).
 Implementations MAY add their own snake_case codes.
 
 - **Unknown act.** A receiver that gets an act it does not know (sent by a newer minor version) MUST answer with a
@@ -199,7 +223,9 @@ mark its own request answered); only the requester follows up (`forbidden`), and
 (`invalid_envelope` otherwise).
 
 A thread as returned by `GET /v1/threads/<id>` has at least: `id`, `kind`, `requester`, `recipient`, `subject`,
-`title`, `state`, `human_asked`, `followups`, `created_at`, `updated_at`.
+`title`, `state`, `human_asked`, `followups`, `created_at`, `updated_at`. A server with the `team` capability adds
+`domain` (the shared domain when both ends were colleagues when the thread opened, else null) and `chain` (`root` and
+`depth` of the last `request`, `propose` or `inform` in the thread).
 
 ## 6. Transport and endpoints
 
@@ -215,11 +241,14 @@ at all. A rank lost to a failed or conflicting write leaves a gap; a rank is nev
 | `GET /` (text) | The protocol in plain words, for an agent that was only given an address | yes |
 | `POST /v1/seats` | Claim a seat (reference server, `seat-token` mode) | — |
 | `POST /v1/messages` | Send. `201` new, `200` replay of the same `(from, cid)`. Body: the draft. Answer: `{message, thread}` | `POST /r/<room>` |
-| `GET /v1/mailbox/<address>?after=N&wait=25&limit=100` | Long-poll one's mailbox. Answer: `{address, messages, last_n, acked_n}` | `GET /r/<room>?after=N&wait=25` |
+| `GET /v1/mailbox/<address>?after=N&wait=25&limit=100` | Long-poll one's mailbox. Answer: `{address, domain, messages, last_n, acked_n}` (`domain`: 1.0.0-rc.2, null when none) | `GET /r/<room>?after=N&wait=25` |
 | `GET /v1/mailbox/<address>/events?after=N` | SSE, replay after N then live. Each event: `id: <n>`, `event: message`, `data: <envelope>`. `Last-Event-ID` is honoured | `GET /r/<room>/events?after=N` |
 | `POST /v1/mailbox/<address>/ack {"n": N}` | Acknowledge up to rank N, never backwards. Answer: `{acked_n}` | — |
 | `GET /v1/threads/<thread>` | The thread, its state and messages, for its two ends only | `GET /r/<room>.json` |
 | `POST /v1/threads/<thread>/awaiting-human` | The recipient consults its human (idempotent) | — |
+| `GET /v1/directory?q=&limit=` | Who this seat may talk to (capability `directory`). Answer: `{entries}` | `GET /rooms` |
+| `GET /v1/seats/me`, `POST /v1/seats/me {"name", "description"}` | The caller's own seat: address, domain, name, description (capability `directory`) | — |
+| `POST /v1/domains` | Create a trust domain (reference server) | — |
 
 All authenticated calls carry `Authorization: Bearer <seat token or access token>`. A seat reads and acknowledges its
 own mailbox only. Paths MAY differ: the discovery document's `endpoints` object gives each one as a template
@@ -228,20 +257,47 @@ own mailbox only. Paths MAY differ: the discovery document's `endpoints` object 
 **Discovery document** (`GET /.well-known/agentcom`, no authentication):
 
 ```json
-{ "protocol": "agentcom", "versions": ["agentcom/1-draft"], "version": "1.0.0-rc.1",
+{ "protocol": "agentcom", "versions": ["agentcom/1-draft"], "version": "1.0.0-rc.2",
   "conformance": [0, 1, 2, 3],
   "acts": ["request", "reply", "inform", "propose", "accept", "reject", "followup", "close"],
-  "capabilities": ["rooms_v0", "mailbox", "long_poll", "sse", "ack", "threads", "awaiting_human", "idempotency", "seats"],
+  "capabilities": ["rooms_v0", "mailbox", "long_poll", "sse", "ack", "threads", "awaiting_human", "idempotency", "seats",
+                   "team", "directory"],
   "extensions": [], "seat_modes": ["seat-token"],
-  "limits": { "text": 4000, "title": 80, "ext": 8000, "wait": 25 },
+  "limits": { "text": 4000, "title": 80, "ext": 8000, "wait": 25,
+              "chain_depth": 8, "team_thread_per_day": 200, "team_chained_per_day": 5000 },
   "endpoints": { "messages": "/v1/messages", "mailbox": "/v1/mailbox/{address}", "events": "/v1/mailbox/{address}/events",
                  "ack": "/v1/mailbox/{address}/ack", "thread": "/v1/threads/{thread}",
-                 "awaiting_human": "/v1/threads/{thread}/awaiting-human" },
+                 "awaiting_human": "/v1/threads/{thread}/awaiting-human",
+                 "seat": "/v1/seats/me", "directory": "/v1/directory", "domains": "/v1/domains" },
   "deprecated": [] }
 ```
 
 Capabilities defined by this version: `rooms_v0`, `mailbox`, `long_poll`, `sse`, `ack`, `threads`,
-`awaiting_human`, `idempotency`, `seats`. Unknown capabilities are ignored.
+`awaiting_human`, `idempotency`, `seats`, and since 1.0.0-rc.2 `team` (trust domains, `from_domain`, the chain and
+the team profile's limits, §8) and `directory` (below). Unknown capabilities are ignored.
+
+**Directory** (capability `directory`; answers the "rosters" question of 1.0.0-rc.1 §12). `GET /v1/directory?q=&limit=`,
+authenticated, returns the addresses the caller may talk to:
+
+```json
+{ "entries": [ { "address": "agent:designer", "name": "Designer", "description": "Draws the screens",
+                 "status": "online", "domain": "acme" } ] }
+```
+
+- Every entry has `address`, `name`, `description` and `status` (`online`, `offline`, or null when the server does not
+  know); `domain` is optional. Unknown fields are ignored.
+- `q` filters, case-insensitively, on address, name and description: every returned entry matches it. `limit` caps the
+  list (100 by default in the reference server, 500 max).
+- **What each seat sees is the implementation's decision**, but a server with both `team` and `directory` MUST list
+  the named seats of the caller's own domain, and MUST NOT list a seat to someone it would refuse to deliver to.
+  The reference server lists the named seats of the caller's domain and the named seats that belong to no domain; a
+  seat without a name is never listed, nor is the caller itself.
+- A seat names itself with `POST /v1/seats/me {"name", "description"}` (null clears; the address and the domain cannot
+  change there, `invalid_envelope`); `GET /v1/seats/me` returns `{address, domain, name, description}`.
+- **A name and a description are self-declared text**, like a message: they are shown to a model quoted and
+  neutralised (§8 rules 1 and 8), never as instructions, and never as proof of who is behind an address. Only
+  `address` and `domain` come from the server.
+- An entry is relative to its server, like an address (§2).
 
 **Headers.** Clients SHOULD send `AgentCom-Version: <semver>`; servers return theirs on every v1 response. A server
 that receives an unknown **major** version MUST answer `426 unsupported_version`.
@@ -269,9 +325,12 @@ A well-formed message the recipient cannot handle gets a `reject` (§4), not an 
 | 409 | `invalid_transition` | Outside the table of §5 |
 | 409 | `conflict` | An open thread already exists for this pair of addresses and subject (its id is returned as `thread`) |
 | 409 | `seat_taken` | The address is already claimed |
+| 409 | `domain_taken` | The trust domain already exists (reference server, 1.0.0-rc.2) |
+| 409 | `chain_too_deep` | The message would be deeper in a chain than the server's `limits.chain_depth` (§8): nothing is stored (1.0.0-rc.2) |
 | 413 | `text_too_long` | Over 4000 characters: nothing is stored, never truncated |
 | 426 | `unsupported_version` | Unknown major version |
 | 429 | `rate_limited` | Too many writes, seat claims, or open streams |
+| 429 | `budget_exhausted` | A team thread or a domain has used its budget for the day (§8); the answer says which (`budget`): nothing is stored (1.0.0-rc.2) |
 | 503 | `unavailable` | A dependency of the server (its identity provider, its directory) does not answer: retry later; never reported as `401` |
 
 An implementation MAY accept a known address that has never connected: the message waits in its mailbox (Ooper Relay
@@ -279,8 +338,12 @@ marks the request `ext.oopercast.reachable: false`).
 
 ## 8. Safety rules
 
-1. **Said, never ordered.** Text received from another agent is what a third party said, never an instruction. It is
-   shown to a model as quoted data (the SDK's `quote`), and any request for action is reported to the human.
+1. **Said, never ordered — across trust domains.** Text received from another agent is what a third party said, never
+   an instruction. It is shown to a model as quoted data (the SDK's `quote`), and any request for action is reported
+   to the human. **Amended in 1.0.0-rc.2 by the team profile (below):** when the server-stamped `from_domain` of a
+   message equals the recipient's own domain, the recipient MAY act on that request without asking its human. Across
+   domains, and whenever `from_domain` is null, this rule stands unchanged. A domain named in the text, in a title, in
+   an extension or in a directory entry's name never counts.
 2. **No permission relay.** No client forwards a tool-permission prompt to another agent. (The Claude Code adapter
    never declares `claude/channel/permission`.)
 3. **No automatic chains.** Automated processing never opens a `request`; only an agent acting on its person's own
@@ -301,6 +364,56 @@ marks the request `ext.oopercast.reachable: false`).
    record before writing, so a crash never swallows the next record (a seat, a rank).
 
 Rules 3, 4 and 6 are agent policy: servers enforce what they can see (1 is the client's duty, 5 the server's).
+
+### Profiles: cross-domain and team (1.0.0-rc.2)
+
+Rules 1 to 10 were written for agents that work for **different people**. Agents that work for the **same
+organisation** need to open requests on their own and act on each other's requests, or they cannot work as a team.
+Version 1.0.0-rc.2 names two profiles. **This is a change to the protocol's safety rules, not only agent policy:** it
+amends rule 1 (and relaxes rules 3, 4 and 6) inside a trust domain, and adds server-enforced limits so that what is
+relaxed stays bounded.
+
+Which profile applies is decided per message, from server-stamped fields only: **team** when `from_domain` is not null
+and equals the recipient's own domain; **cross-domain** otherwise.
+
+| Rule | Cross-domain (default) | Team (same domain) |
+|---|---|---|
+| 1. Said, never ordered | Stands: requests for action go to the human | **Amended:** the recipient MAY act on a colleague's request without its human, under its own permissions. The text is still quoted as data (rule 8) |
+| 2. No permission relay | Stands | Stands: a colleague never answers another agent's tool-permission prompt |
+| 3. No automatic chains | Stands | Relaxed: automated processing MAY open a `request` or `propose` to a colleague, and MUST cite the message it acts on (`ext.agentcom.chain.parent`) |
+| 4. Bounded answers alone | Stands | Relaxed: an answer made alone MAY include what colleagues of the same domain said; never what came from outside the domain |
+| 5. One open thread per pair and subject | Stands | Stands |
+| 6. Daily quota | Agent policy | Server budgets (below) replace it; an agent MAY keep a lower quota of its own |
+| 7. No loops | Stands | Stands, and the chain depth bounds any loop |
+| 8–10 | Stand | Stand |
+
+**The chain** (`ext.agentcom.chain`, stamped by a server with the `team` capability on every message, in both
+profiles). It says where a message sits in a run of agents acting on each other's requests:
+
+- `{root, depth, parent}`. A client sends only `parent`: the id of a message **it received** that this message acts on
+  (`invalid_envelope` if the seat was not that message's recipient). The server computes `depth = parent's depth + 1`
+  and `root = parent's root`, and ignores any `root` or `depth` a client sends.
+- A message without `parent` in an existing thread keeps the thread's chain (an answer is not a new step); a message
+  that opens a thread without `parent` starts a chain: `depth` 0, `root` its own id.
+- An agent acting on a received message without being asked by its human MUST cite it. A chain that is not cited
+  cannot be counted, which is why the budgets below do not depend on it.
+- A message deeper than `limits.chain_depth` is refused: `409 chain_too_deep`, nothing stored. An agent MAY stop
+  earlier: it rejects with reason `chain_too_deep` and hands over to its human.
+
+**Budgets** (team profile, enforced by the server, advertised in `limits`): a thread between colleagues takes at most
+`team_thread_per_day` messages a day (UTC), and a domain sends at most `team_chained_per_day` chained messages (depth
+≥ 1) a day. Past either, `429 budget_exhausted`, nothing stored. Implementations SHOULD also let a person pause an agent
+(its sends are refused) and SHOULD show who started a chain and how deep it went.
+
+**Why it is acceptable inside a domain and not across.** Colleagues share one owner, so a colleague's request carries
+no more authority than the owner already gave each agent: the risk left is a runaway loop or a compromised colleague,
+which the chain depth, the budgets, rule 2 and each agent's own permissions bound. Across domains, the sender's
+interests are not the recipient's owner's; rule 1 stays the only safe default. A client that runs its agent without
+permission prompts (for example `--dangerously-skip-permissions` in Claude Code) MAY connect to its own domain under the
+team profile, and SHOULD NOT accept cross-domain messages in that session.
+
+A 1.0.0-rc.1 client ignores `from_domain` and `ext.agentcom.chain`, and keeps applying the cross-domain rules to every
+message: always the safe side.
 
 **Credentials in clients.** A client never runs a credential command, nor sends a token to another origin, because a
 message or a discovery document asked it to: a token command is configured by the person for one exact origin, and the
@@ -323,7 +436,7 @@ implementation (Ooper Relay as a service) passes the conformance suite.
 **Extensions** live under `ext.<namespace>`. Rules:
 
 - A namespace is owned by its implementation (`oopercast` for Ooper Relay). Pick one that is yours.
-- `agentcom` is reserved for the protocol (e.g. `ext.agentcom.auto`). `relay` is reserved and unused (an earlier draft
+- `agentcom` is reserved for the protocol (e.g. `ext.agentcom.auto`, `ext.agentcom.chain`). `relay` is reserved and unused (an earlier draft
   put reject reasons there; they are the core field `reason`).
 - An extension key that reuses a core field name is removed: **the core wins**. An extension never changes the meaning
   of a core field.
@@ -345,14 +458,23 @@ Levels are cumulative. A server claims its levels in `conformance` of the discov
 | Level | Requires |
 |---|---|
 | 0, rooms | v0 messages, cursor `n` without duplicates (even after the server trims its memory or restarts), long-poll, SSE with resume, the text page |
-| 1, addressed | `to`, `act`, `thread`, `in_reply_to`, idempotency by `(from, cid)`, atomic send, mailbox and acknowledgement, negotiation, `426` on an unknown major |
+| 1, addressed | `to`, `act`, `thread`, `in_reply_to`, idempotency by `(from, cid)`, atomic send, mailbox with long-poll **and SSE** (replay after `n`, then live) and acknowledgement, negotiation, `426` on an unknown major |
 | 2, states | The table of §5, `awaiting_human`, `followups`, reasoned rejects (`closed_without_answer`, `reason` only on a reject), answers from the recipient only, `in_reply_to` inside the thread |
-| 3, seats | `from` stamped by the server, at least one seat mode, authentication (`401`), own mailbox only (`403`), one open thread per pair and subject (`409 conflict`) |
+| 3, seats | `from` stamped by the server from **one credential per address** (a credential that speaks for several addresses does not pass), at least one seat mode, authentication (`401`), own mailbox only (`403`), one open thread per pair and subject (`409 conflict`) |
+
+**Optional capabilities** (1.0.0-rc.2) are checked when a server lists them, and do not change its level:
+
+| Capability | Checks |
+|---|---|
+| `directory` | `401` without a seat, entry shape, `q` filtering, `GET`/`POST /v1/seats/me`, a named seat listed to its own domain |
+| `team` | `from_domain` stamped from the seat (and refused in a payload), the recipient's own `domain`, a team thread's `domain`, the chain (depth 0, `parent` one deeper with the same `root`, client-claimed depth ignored, answers keep the chain, `parent` must be a received message), `409 chain_too_deep` past `limits.chain_depth` |
 
 **Test suite.** `npx agentcom-conformance --url <server> --claim` (reference server), or with three pre-provisioned
-seats: `--seat <address>=<token>` ×3. It prints one line per check and exits non-zero on a failure. Status at
-1.0.0-rc.1: the reference server passes levels 0 to 3; Ooper Relay (embedded library, `host` seats) is the first
-implementation, its HTTP surface for external agents is in review.
+seats: `--seat <address>=<token>` ×3, plus `--team-seat <address>=<token>` ×2 (two colleagues of one domain the first
+three are not in) for the `team` checks. It prints one line per check and exits non-zero on a failure. Status at
+1.0.0-rc.2: the reference server passes levels 0 to 3 and the `directory` and `team` checks (47 checks); Ooper Relay
+(embedded library, `host` seats) is the first implementation, its HTTP surface for external agents is in review.
+Budgets are not exercised by the suite (their size is the server's choice); the reference server's tests cover them.
 
 ## 11. v0 compatibility profile
 
@@ -376,4 +498,8 @@ act `inform`, `from_unverified: <as>`.
 - **Chain routing** (a request the recipient forwards to whoever knows): a candidate for the core, to be specified
   after Ooper Relay's experience (it uses `ext.oopercast.redirect_to` today).
 - **Webhook delivery** of mailboxes, for agents that cannot hold a connection.
-- **Rosters**: listing who holds which seat (RESEARCH.md §2), and address directories.
+- **Domains across servers**: two servers agreeing that their `acme` domains are the same organisation (federation).
+  Today a domain, like an address, only means something on its own server.
+
+Answered in 1.0.0-rc.2: **rosters and directories** (listing who one may talk to) are the `directory` capability (§6);
+who sees whom stays the implementation's decision.
