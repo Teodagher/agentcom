@@ -398,8 +398,10 @@ export async function runConformance(o: ConformanceOptions): Promise<Conformance
     await refused(new AgentComClient({ baseUrl, endpoints: anyDir().endpoints, headers: o.headers, fetch: f }).directory(), "unauthenticated", 401);
   }, "directory");
   await check(3, "directory: entries are {address, name, description, status}", async () => {
-    const entries = await A().directory({ limit: 50 });
+    if (teamSeats.length >= 2 && caps.includes("team")) await client(teamSeats[0]).updateMe({ name: "Shape check" });
+    const entries = await (teamSeats.length >= 2 && caps.includes("team") ? client(teamSeats[1]) : A()).directory({ limit: 50 });
     assert(Array.isArray(entries), "entries is not a list");
+    if (teamSeats.length >= 2 && caps.includes("team")) assert(entries.length > 0, "a named colleague is not listed");
     for (const e of entries) {
       assert(typeof e.address === "string" && /^[a-z][a-z0-9_-]{0,30}:/.test(e.address), `not an address: ${JSON.stringify(e.address)}`);
       for (const k of ["name", "description", "status"] as const) assert(k in e, `entry ${e.address} has no "${k}"`);
@@ -415,9 +417,13 @@ export async function runConformance(o: ConformanceOptions): Promise<Conformance
   }, "directory");
   await check(3, "directory: q filters on address, name and description (case-insensitive)", async () => {
     const tag = rand();
-    await A().updateMe({ name: `Filter ${tag.toUpperCase()}` });
-    const entries = await B().directory({ q: tag });
+    const team = teamSeats.length >= 2 && caps.includes("team");
+    /* Colleagues must see each other (spec §6); without two of them, only the filtering itself can be checked. */
+    const [named, searcher, namedAddr] = team ? [client(teamSeats[0]), client(teamSeats[1]), teamSeats[0]!.address] : [A(), B(), addr(0)];
+    await named.updateMe({ name: `Filter ${tag.toUpperCase()}` });
+    const entries = await searcher.directory({ q: tag });
     for (const e of entries) assert([e.address, e.name ?? "", e.description ?? ""].some((x) => x.toLowerCase().includes(tag)), `entry ${e.address} does not match "${tag}"`);
+    if (team) assert(entries.some((e) => e.address === namedAddr), `a colleague named "Filter ${tag.toUpperCase()}" is not found by q="${tag}"`);
     const none = await B().directory({ q: `${rand()}${rand()}-nobody` });
     assert(none.length === 0, `a query matching nothing returned ${none.length} entries`);
   }, "directory");
@@ -490,7 +496,13 @@ export async function runConformance(o: ConformanceOptions): Promise<Conformance
       assert(chainOf(last)?.depth === depth, `depth ${chainOf(last)?.depth}, expected ${depth}`);
     }
     const from = (max + 1) % 2;
-    await refused(T(from).send(act.request(taddr(1 - from), "One step too far", { cause: last })), "chain_too_deep", 409);
+    const before = (await T(1 - from).inbox({ after: 0, limit: 1 })).last_n;
+    const tooDeep = act.request(taddr(1 - from), "One step too far", { cause: last });
+    await refused(T(from).send(tooDeep), "chain_too_deep", 409);
+    if (before != null) assert((await T(1 - from).inbox({ after: 0, limit: 1 })).last_n === before, "a refused message took a rank in the mailbox");
+    /* Nothing was stored under its cid: the same cid without the citation is a new message. */
+    const again = await T(from).send({ ...tooDeep, ext: {} });
+    assert(again.created && chainOf(again.message)?.depth === 0, "the cid of the refused message was stored");
   }, "team");
 
   const levelResults = results.filter((r) => !r.capability);

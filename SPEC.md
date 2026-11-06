@@ -264,7 +264,7 @@ own mailbox only. Paths MAY differ: the discovery document's `endpoints` object 
                    "team", "directory"],
   "extensions": [], "seat_modes": ["seat-token"],
   "limits": { "text": 4000, "title": 80, "ext": 8000, "wait": 25,
-              "chain_depth": 8, "team_thread_per_day": 200, "team_chained_per_day": 5000 },
+              "chain_depth": 8, "team_thread_per_day": 200, "team_domain_per_day": 10000 },
   "endpoints": { "messages": "/v1/messages", "mailbox": "/v1/mailbox/{address}", "events": "/v1/mailbox/{address}/events",
                  "ack": "/v1/mailbox/{address}/ack", "thread": "/v1/threads/{thread}",
                  "awaiting_human": "/v1/threads/{thread}/awaiting-human",
@@ -395,15 +395,22 @@ profiles). It says where a message sits in a run of agents acting on each other'
   and `root = parent's root`, and ignores any `root` or `depth` a client sends.
 - A message without `parent` in an existing thread keeps the thread's chain (an answer is not a new step); a message
   that opens a thread without `parent` starts a chain: `depth` 0, `root` its own id.
-- An agent acting on a received message without being asked by its human MUST cite it. A chain that is not cited
-  cannot be counted, which is why the budgets below do not depend on it.
+- An agent acting on a received message without being asked by its human MUST cite it, and SHOULD cite the message
+  it actually acts on. The server can only check that the parent was received, not that it is the right one, nor that a
+  parent was left out: **depth is a lower bound** that an honest client keeps exact. That is why the budgets below count
+  every message between colleagues, cited or not.
 - A message deeper than `limits.chain_depth` is refused: `409 chain_too_deep`, nothing stored. An agent MAY stop
   earlier: it rejects with reason `chain_too_deep` and hands over to its human.
 
 **Budgets** (team profile, enforced by the server, advertised in `limits`): a thread between colleagues takes at most
-`team_thread_per_day` messages a day (UTC), and a domain sends at most `team_chained_per_day` chained messages (depth
-≥ 1) a day. Past either, `429 budget_exhausted`, nothing stored. Implementations SHOULD also let a person pause an agent
+`team_thread_per_day` messages a day (UTC), and colleagues of a domain send each other at most `team_domain_per_day`
+messages a day, cited or not. Past either, `429 budget_exhausted`, nothing stored. Implementations SHOULD also let a person pause an agent
 (its sends are refused) and SHOULD show who started a chain and how deep it went.
+
+**A domain key is a bearer secret.** Whoever holds it can create seats that colleagues trust under the team profile.
+Implementations SHOULD control who creates domains and joins them (the reference server's open registration lets anyone
+create a domain name that is free, and has no key rotation or removal yet: close registration, `AGENTCOM_SEATS=closed`,
+for anything but development), and SHOULD let an owner revoke a key and remove a seat from a domain.
 
 **Why it is acceptable inside a domain and not across.** Colleagues share one owner, so a colleague's request carries
 no more authority than the owner already gave each agent: the risk left is a runaway loop or a compromised colleague,
@@ -475,6 +482,7 @@ three are not in) for the `team` checks. It prints one line per check and exits 
 1.0.0-rc.2: the reference server passes levels 0 to 3 and the `directory` and `team` checks (47 checks); Ooper Relay
 (embedded library, `host` seats) is the first implementation, its HTTP surface for external agents is in review.
 Budgets are not exercised by the suite (their size is the server's choice); the reference server's tests cover them.
+`--claim` leaves the seats and the domain it created behind on the server it ran against: use it on a test server.
 
 ## 11. v0 compatibility profile
 
@@ -498,6 +506,8 @@ act `inform`, `from_unverified: <as>`.
 - **Chain routing** (a request the recipient forwards to whoever knows): a candidate for the core, to be specified
   after Ooper Relay's experience (it uses `ext.oopercast.redirect_to` today).
 - **Webhook delivery** of mailboxes, for agents that cannot hold a connection.
+- **Domain membership changes**: rotating a domain key, removing a seat from a domain, and what happens to its open
+  team threads (the reference server has none of this yet).
 - **Domains across servers**: two servers agreeing that their `acme` domains are the same organisation (federation).
   Today a domain, like an address, only means something on its own server.
 

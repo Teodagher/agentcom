@@ -20,8 +20,9 @@ ignores the new fields and keeps applying the cross-domain rules to every messag
 - **The chain** `ext.agentcom.chain {root, depth, parent}`, stamped by the server on every message: a client cites only
   `parent` (a message it received); the server computes `root` and `depth` and ignores what a client claims. Answers keep
   their thread's chain. Past `limits.chain_depth`: `409 chain_too_deep`, nothing stored.
-- **Budgets** of the team profile, enforced by the server: messages per team thread per day, chained messages per
-  domain per day (`limits.team_thread_per_day`, `limits.team_chained_per_day`); past them `429 budget_exhausted`.
+- **Budgets** of the team profile, enforced by the server: messages per team thread per day, and messages between
+  colleagues of a domain per day, cited or not (`limits.team_thread_per_day`, `limits.team_domain_per_day`); past them
+  `429 budget_exhausted`. They do not depend on agents citing their chain.
 - **Directory** (capability `directory`), answering the "rosters" open question: `GET /v1/directory?q=&limit=` returns
   `{address, name, description, status}` entries the caller may talk to (visibility is the implementation's decision;
   with `team`, a seat's own named colleagues MUST be listed). `GET`/`POST /v1/seats/me` reads the caller's seat and sets
@@ -39,12 +40,25 @@ ignores the new fields and keeps applying the cross-domain rules to every messag
 - `from_domain` stamped, the chain computed, `chain_too_deep` and the two budgets enforced (rebuilt from the log on start).
 - `GET /v1/directory` (named seats of the caller's domain, plus named seats with no domain; status `online` while a
   stream is open or after a call in the last two minutes), `GET`/`POST /v1/seats/me`.
-- `AGENTCOM_CHAIN_DEPTH` (8), `AGENTCOM_TEAM_THREAD_BUDGET` (200), `AGENTCOM_TEAM_DAILY_BUDGET` (5000).
+- `AGENTCOM_CHAIN_DEPTH` (8), `AGENTCOM_TEAM_THREAD_BUDGET` (200), `AGENTCOM_TEAM_DAILY_BUDGET` (10000).
+- Names and descriptions are one plain line (control characters, Unicode line separators and bidi overrides become
+  spaces); `POST /v1/seats/me` is rate-limited like other writes. Messages stored by rc.1 come back with
+  `from_domain: null`, and an old `ext.<ns>.from_domain` key is dropped on the way out (also on a cid replay).
 - Passes levels 0 to 3 and the `directory` and `team` checks.
+
+### After the adversarial review (still 1.0.0-rc.2)
+- The domain budget counts every message between colleagues, cited or not: an agent that never cites its parent and
+  opens a new thread each time is no longer outside every budget. The spec now says depth is a lower bound.
+- Spec: a domain key is a bearer secret (control who creates and joins domains; revocation SHOULD exist; the reference
+  server has none yet, listed in §12).
+- Conformance: the `q` and entry-shape checks need a colleague to be found when team seats are available;
+  `chain_too_deep` also checks that nothing was stored and the cid stays free.
 
 ### SDK 1.0.0-rc.2
 - `Envelope.from_domain`; `validateDraft` refuses `from_domain` and checks `ext.agentcom.chain.parent`.
-- `profileOf`, `sameDomain`, `mayActOn`, `chainOf`, `causedBy`; a `cause` option on `request`, `propose` and `inform`.
+- `profileOf`, `sameDomain`, `mayActOn` (with `server`: trusts `from_domain` only if the server lists `team`, and reads
+  its `limits.chain_depth`), `chainOf`, `causedBy`; a `cause` option on `request`, `propose` and `inform`;
+  `quoteDirectoryEntry`; `plain` also neutralises Unicode line separators and bidi overrides.
 - Client: `directory`, `me`, `updateMe`, `inbox().domain`; `claimSeat` and `createDomain` for the reference server.
 - Conformance: optional capability checks (`--team-seat`, `--capability`), report lists capabilities passed.
 - README: the warning about `--dangerously-skip-permissions` is nuanced (acceptable inside one's own domain, never

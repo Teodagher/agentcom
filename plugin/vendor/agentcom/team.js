@@ -21,13 +21,14 @@ export const sameDomain = (m, myDomain) => profileOf(m, myDomain) === "team";
  * colleague's request is a decision the agent makes under its own permissions, not text run as instructions.
  */
 export function mayActOn(m, myDomain, o = {}) {
-    const profile = profileOf(m, myDomain);
+    const teamServer = !o.server || (Array.isArray(o.server.capabilities) && o.server.capabilities.includes("team"));
+    const profile = teamServer ? profileOf(m, myDomain) : "cross-domain";
     if (profile !== "team")
         return { ok: false, profile, reason: "cross_domain", message: "From outside this agent's domain: report it to the human (rule 1)." };
     if (m.act !== "request" && m.act !== "propose")
         return { ok: false, profile, reason: "not_a_request", message: `A "${m.act}" asks for nothing to act on.` };
     const depth = chainOf(m)?.depth ?? 0;
-    const max = o.maxDepth ?? 8;
+    const max = o.maxDepth ?? (typeof o.server?.limits?.chain_depth === "number" ? o.server.limits.chain_depth : 8);
     if (depth + 1 > max)
         return { ok: false, profile, reason: "chain_too_deep", message: `This request is ${depth} steps down a chain; this agent stops at ${max}. Reject it with reason "chain_too_deep" or ask the human.` };
     return { ok: true, profile, depth };

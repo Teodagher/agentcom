@@ -1266,10 +1266,11 @@ const V1_UUID = /^[0-9a-f-]{36}$/i;
 // A trust domain: an organisation whose agents may act on each other's requests (SPEC.md §8, team profile).
 const V1_DOMAIN = /^[a-z0-9](?:[a-z0-9.-]{0,62}[a-z0-9])?$/;
 // Team profile limits. A chain deeper than this is refused (chain_too_deep); a team thread takes at most
-// THREAD_BUDGET messages a day (UTC); a domain sends at most DAILY_BUDGET chained messages (depth ≥ 1) a day.
+// THREAD_BUDGET messages a day (UTC); colleagues of a domain send each other at most DAILY_BUDGET messages a day,
+// cited or not (an agent that never cites its parent is still counted).
 const V1_CHAIN_DEPTH = Math.max(1, Number(process.env.AGENTCOM_CHAIN_DEPTH || 8));
 const V1_THREAD_BUDGET = Math.max(1, Number(process.env.AGENTCOM_TEAM_THREAD_BUDGET || 200));
-const V1_DAILY_BUDGET = Math.max(1, Number(process.env.AGENTCOM_TEAM_DAILY_BUDGET || 5000));
+const V1_DAILY_BUDGET = Math.max(1, Number(process.env.AGENTCOM_TEAM_DAILY_BUDGET || 10000));
 // Directory: a seat counts as online while it holds a stream or called in the last two minutes.
 const V1_ONLINE_MS = 120_000;
 const V1_NAME_MAX = 80;
@@ -1336,12 +1337,11 @@ function v1Count(key, by = 1) {
 
 function v1AddMessage(m) {
   v1.messages.set(m.id, m);
-  // Team budgets: messages of a team thread per day, chained messages of a domain per day.
+  // Team budgets: messages of a team thread per day, messages between colleagues of a domain per day.
   const team = v1TeamDomain(m.from_domain, m.to);
   if (team) {
     v1Count(`t:${m.thread}:${v1Day(m.at)}`);
-    const c = v1Chain(m);
-    if (c && c.depth >= 1) v1Count(`d:${team}:${v1Day(m.at)}`);
+    v1Count(`d:${team}:${v1Day(m.at)}`);
   }
   v1.byCid.set(`${m.from}\n${m.cid}`, m.id);
   const box = v1Box(m.to);
@@ -1491,7 +1491,7 @@ function v1Discovery() {
     reserved_spaces: V1_SEATS === 'open' ? V1_RESERVED : [],
     limits: {
       text: V1_TEXT_MAX, title: V1_TITLE_MAX, ext: V1_EXT_MAX, wait: MAX_WAIT,
-      chain_depth: V1_CHAIN_DEPTH, team_thread_per_day: V1_THREAD_BUDGET, team_chained_per_day: V1_DAILY_BUDGET,
+      chain_depth: V1_CHAIN_DEPTH, team_thread_per_day: V1_THREAD_BUDGET, team_domain_per_day: V1_DAILY_BUDGET,
     },
     endpoints: {
       seats: '/v1/seats',
@@ -1620,7 +1620,7 @@ function v1Send(from, x) {
   const known = v1.byCid.get(`${from}\n${x.cid}`);
   if (known) {
     const m = v1.messages.get(known);
-    return { status: 200, message: m, thread: v1.threads.get(m.thread) };
+    return { status: 200, message: v1Out(m), thread: v1.threads.get(m.thread) };
   }
   if (x.to === from) throw new V1Error(400, 'invalid_envelope', 'An agent does not write to itself.');
   if (!v1.seats.has(x.to)) throw new V1Error(404, 'unknown_recipient', `No seat is registered for ${x.to}. The recipient claims it with POST /v1/seats.`);
@@ -1702,8 +1702,8 @@ function v1Send(from, x) {
     if ((v1.budget.get(`t:${thread.id}:${day}`) || 0) >= V1_THREAD_BUDGET) {
       throw new V1Error(429, 'budget_exhausted', `This team thread has reached its budget of ${V1_THREAD_BUDGET} messages today. Ask a human, or wait until tomorrow (UTC).`, { budget: 'thread', limit: V1_THREAD_BUDGET });
     }
-    if (chain.depth >= 1 && (v1.budget.get(`d:${team}:${day}`) || 0) >= V1_DAILY_BUDGET) {
-      throw new V1Error(429, 'budget_exhausted', `The domain ${team} has reached its budget of ${V1_DAILY_BUDGET} chained messages today. Ask a human, or wait until tomorrow (UTC).`, { budget: 'domain', limit: V1_DAILY_BUDGET });
+    if ((v1.budget.get(`d:${team}:${day}`) || 0) >= V1_DAILY_BUDGET) {
+      throw new V1Error(429, 'budget_exhausted', `The domain ${team} has reached its budget of ${V1_DAILY_BUDGET} messages between colleagues today. Ask a human, or wait until tomorrow (UTC).`, { budget: 'domain', limit: V1_DAILY_BUDGET });
     }
   }
   const ext = v1StripCore(x.ext);
@@ -1726,7 +1726,7 @@ function v1Inbox(address, after, limit) {
   for (const id of box.ids) {
     const m = v1.messages.get(id);
     if (m.n > after) {
-      out.push('from_domain' in m ? m : { ...m, from_domain: null });
+      out.push(v1Out(m));
       if (out.length >= limit) break;
     }
   }
@@ -1757,6 +1757,10 @@ function v1ThreadFor(id, seat) {
 
 const V1_ROUTES = /^\/v1\/(?:seats(?:\/me)?|domains|directory|messages|mailbox\/[^/]+(?:\/events|\/ack)?|threads\/[^/]+(?:\/awaiting-human)?)$/;
 
+// Messages stored before 1.0.0-rc.2 have no from_domain (returned as null), and may carry an ext key that was not a
+// core field then (from_domain): the core wins on the way out too.
+const v1Out = (m) => ({ ...m, from_domain: m.from_domain ?? null, ext: v1StripCore(m.ext) });
+
 // Threads stored before 1.0.0-rc.2 have no domain or chain: they are returned as null, never omitted.
 const v1PublicThread = (t) => ({ ...t, domain: t.domain ?? null, chain: t.chain ?? null });
 
@@ -1772,7 +1776,8 @@ function v1RequireAdmin(req, what) {
 function v1Label(v, max, field) {
   if (v == null || v === '') return null;
   if (typeof v !== 'string') throw new V1Error(400, 'invalid_envelope', `${field}: a string.`);
-  const clean = v.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim();
+  // Control characters, Unicode line and paragraph separators and bidi overrides become spaces: one plain line.
+  const clean = v.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]+/g, ' ').replace(/ {2,}/g, ' ').trim();
   if (clean.length > max) throw new V1Error(400, 'invalid_envelope', `${field}: ${max} characters max.`);
   return clean || null;
 }
@@ -1824,6 +1829,7 @@ async function handleV1(req, res, url, pathname) {
     if (pathname === '/v1/seats/me') {
       const seat = v1Seat(req);
       if (req.method === 'POST') {
+        if (rateLimited(clientIp(req))) throw new V1Error(429, 'rate_limited', 'Too many writes: wait a minute.');
         const body = await v1Body(req);
         const rec = { type: 'profile', address: seat, at: new Date().toISOString() };
         if ('name' in body) rec.name = v1Label(body.name, V1_NAME_MAX, 'name');
@@ -1954,7 +1960,7 @@ async function handleV1(req, res, url, pathname) {
         return v1Json(res, 200, { thread: v1PublicThread(next) });
       }
       const messages = (v1.byThread.get(t.id) || []).map((id) => v1.messages.get(id)).filter(Boolean).sort((a, b) => a.at.localeCompare(b.at) || a.n - b.n);
-      return v1Json(res, 200, { thread: v1PublicThread(t), messages: messages.map((m) => ({ ...m, from_domain: m.from_domain ?? null })) });
+      return v1Json(res, 200, { thread: v1PublicThread(t), messages: messages.map(v1Out) });
     }
     throw new V1Error(404, 'not_found', 'No such endpoint. See GET /.well-known/agentcom.');
   } catch (e) {

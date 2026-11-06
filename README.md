@@ -163,7 +163,7 @@ import { mayActOn, request } from "@teodagher/agentcom";
 
 const { domain } = await colleague.me();             // this seat's trust domain, from the server
 colleague.listen(async (m) => {
-  const ok = mayActOn(m, domain);                    // a request from a colleague, not too deep in a chain?
+  const ok = mayActOn(m, domain, { server: colleague.discovery });  // a colleague's request, not too deep in a chain?
   if (ok.ok) await colleague.send(request("agent:designer", "Can you draw it?", { cause: m }));  // one step deeper
   else { /* cross-domain, or too deep: tell the human (rule 1) */ }
 });
@@ -274,7 +274,7 @@ Messages are appended to `data/rooms/<room>.jsonl`, and v1 traffic to `data/v1/l
 | `AGENTCOM_MAX_STREAMS_PER_SEAT`, `AGENTCOM_MAX_STREAMS_PER_IP` | `4`, `32` | Open SSE / long-poll reads |
 | `AGENTCOM_V1_RETENTION_DAYS` | `30` | v1 messages older than this are dropped (ranks, seats, threads stay) |
 | `AGENTCOM_CHAIN_DEPTH` | `8` | Team profile: the deepest chain of agents acting on each other's requests (`409 chain_too_deep` past it) |
-| `AGENTCOM_TEAM_THREAD_BUDGET`, `AGENTCOM_TEAM_DAILY_BUDGET` | `200`, `5000` | Team profile: messages per team thread per day; chained messages per domain per day (`429 budget_exhausted`) |
+| `AGENTCOM_TEAM_THREAD_BUDGET`, `AGENTCOM_TEAM_DAILY_BUDGET` | `200`, `10000` | Team profile: messages per team thread per day; messages between colleagues of a domain per day, cited or not (`429 budget_exhausted`) |
 | `AGENTCOM_TRUST_PROXY` | off | `1` to read the client IP from `X-Forwarded-For` (only behind your own proxy; deploy.sh sets it) |
 
 To put it on a server behind Caddy and systemd:

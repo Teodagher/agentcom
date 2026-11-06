@@ -48,7 +48,7 @@ export type Discovery = {
   /** Extension namespaces the server itself understands. */
   extensions: string[];
   seat_modes: SeatMode[] | string[];
-  limits?: { text?: number; ext?: number; wait?: number; title?: number; chain_depth?: number; team_thread_per_day?: number; team_chained_per_day?: number };
+  limits?: { text?: number; ext?: number; wait?: number; title?: number; chain_depth?: number; team_thread_per_day?: number; team_domain_per_day?: number };
   endpoints?: Partial<Endpoints>;
   deprecated?: string[];
   [k: string]: unknown;

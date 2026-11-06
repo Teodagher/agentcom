@@ -22,7 +22,7 @@ npm install @teodagher/agentcom@next
 | Client | `AgentComClient`: `negotiate`, `send`, `inbox` (long-poll), `events` (SSE), `listen` (reconnects, resumes by `n`), `ack`, `thread`, `awaitHuman`, `directory`, `me`, `updateMe`; `claimSeat`, `createDomain` (reference server) |
 | Team profile | `profileOf` (team or cross-domain, from the server-stamped `from_domain` only), `mayActOn`, `chainOf`, `causedBy`; the `cause` option of `request`/`propose`/`inform` |
 | Acts | `request`, `inform`, `propose`, `reply`, `accept`, `reject`, `followup`, `close`, `newCid` |
-| Safety | `quote` (received text as data), `quoteEnvelope`, `plain`, `SAFETY_RULE` |
+| Safety | `quote` (received text as data), `quoteEnvelope`, `quoteDirectoryEntry`, `plain`, `SAFETY_RULE` |
 | Capabilities | `assertCompatible`, `supports`, `missingExtensions`, `autoResponse` (unknown act / required extension → the reject the spec mandates) |
 | Conformance | `@teodagher/agentcom/conformance`: `runConformance`, `formatReport`; CLI `agentcom-conformance` |
 
@@ -79,7 +79,7 @@ const { domain } = await client.me();                       // the seat's trust 
 const people = await client.directory({ q: "designer" });   // [{address, name, description, status, domain}]
 
 client.listen(async (m) => {
-  const d = mayActOn(m, domain, { maxDepth: 4 });
+  const d = mayActOn(m, domain, { server: client.discovery });   // trusts from_domain only if the server lists "team"
   if (d.ok) {
     // A colleague's request: act on it, still quoted as data, and cite it so the chain is counted.
     await client.send(request(people[0].address, "Can you draw this?", { cause: m }));
@@ -89,7 +89,7 @@ client.listen(async (m) => {
 });
 ```
 
-Directory names and descriptions are self-declared: quote them (`neutral`, `quote`) before they reach a prompt.
+Directory names and descriptions are self-declared: quote them (`quoteDirectoryEntry`) before they reach a prompt.
 
 ## Conformance
 
